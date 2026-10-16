@@ -59,8 +59,11 @@ def test_mc_untouched_when_fine():
         (3_000_000, 1000, 5000, True),
         (0.45, 0, 100, False),  # small but inside the range: not flagged
         (45, 0, 1, True),  # percent given for a fraction question
-        (-500, -10, 10, True),
+        (0, 1000, 5000, True),  # zero for a 1,000-5,000 question
+        (-500, -10, 10, False),  # range includes negatives: no ratio check (B8)
         (12, -10, 10, False),
+        (1001, 0, 100, True),  # just over 10x the upper bound
+        (999, 0, 100, False),
     ],
 )
 def test_unit_error_detection(median, lo, hi, expected):
@@ -72,22 +75,46 @@ def test_implied_median_interpolates():
     assert guards.implied_median(pts) == pytest.approx(50)
 
 
-def test_wide_fallback_spans_range_linear_and_log():
-    lin = guards.wide_fallback_percentiles(0, 100, None)
-    assert [v for _, v in lin] == pytest.approx([10, 20, 40, 60, 80, 90])
-    log = guards.wide_fallback_percentiles(1000, 5000, 0)
-    vals = [v for _, v in log]
-    assert vals == sorted(vals) and 1000 < vals[0] < vals[-1] < 5000
+def test_mc_floor_is_iterative_many_tiny_options():  # B13
+    # One pass of "lift to floor then renormalize" would push lifted options
+    # back under the floor; the iterative version must not.
+    probs = {"big": 0.9, **{f"o{i}": 0.004 for i in range(25)}}
+    r = guards.floor_and_normalize(probs)
+    assert abs(sum(r.value.values()) - 1) < 1e-12
+    assert min(r.value.values()) >= 0.01 - 1e-12
+    assert r.value["big"] == pytest.approx(1 - 0.01 * 25)
 
 
-def test_cdf_problems_detects_bad_cdfs():
-    n = 201
-    good = [0.001 + 0.998 * i / (n - 1) for i in range(n)]
-    assert guards.cdf_problems(good, True, True, n) == []
-    bad = list(good)
-    bad[100], bad[101] = bad[101], bad[100]
-    assert any("monotonic" in p for p in guards.cdf_problems(bad, True, True, n))
-    assert guards.cdf_problems(good, False, True, n)  # closed lower needs cdf[0]=0
-    spike = [0.0] * 100 + [1.0] * 101
-    assert any("narrow" in p for p in guards.cdf_problems(spike, False, False, n))
-    assert guards.cdf_problems(good[:-1], True, True, n)
+def test_mc_floor_too_high_rejected(monkeypatch):
+    monkeypatch.setenv("MC_MIN_PROB", "0.3")
+    with pytest.raises(ValueError):
+        guards.floor_and_normalize({"a": 0.5, "b": 0.3, "c": 0.1, "d": 0.1})
+
+
+def _numeric_question(**kw):
+    from forecasting_tools import NumericQuestion
+
+    base = dict(question_text="q", id_of_post=1, id_of_question=1, page_url="https://example.invalid/q/1/",
+                lower_bound=0, upper_bound=100, open_lower_bound=False, open_upper_bound=True)
+    base.update(kw)
+    return NumericQuestion(**base)
+
+
+def test_sdk_cdf_is_monotonic_and_respects_bounds():  # B8: validity is the SDK's job
+    from forecasting_tools import NumericDistribution, Percentile
+
+    q = _numeric_question()
+    pts = [Percentile(percentile=p, value=v) for p, v in [(0.1, 5), (0.2, 6), (0.4, 6.5), (0.6, 7), (0.8, 7.2), (0.9, 7.3)]]
+    cdf = [p.percentile for p in NumericDistribution.from_question(pts, q).get_cdf()]
+    assert len(cdf) == 201 and cdf[0] == 0.0 and cdf[-1] <= 0.999 + 1e-9
+    steps = [b - a for a, b in zip(cdf, cdf[1:])]
+    assert min(steps) >= 0.01 / 200 * 0.99  # SDK enforces a minimum step
+
+
+def test_sdk_rejects_non_monotonic_percentiles():  # B8
+    from forecasting_tools import NumericDistribution, Percentile
+
+    q = _numeric_question()
+    pts = [Percentile(percentile=p, value=v) for p, v in [(0.1, 50), (0.2, 40), (0.4, 60), (0.6, 70), (0.8, 80), (0.9, 90)]]
+    with pytest.raises(Exception):
+        NumericDistribution.from_question(pts, q).get_cdf()

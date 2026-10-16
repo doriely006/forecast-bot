@@ -63,17 +63,22 @@ def load_fixture_questions() -> dict[str, list]:
 class FakeClient:
     """Stands in for forecasting_tools.MetaculusClient."""
 
-    def __init__(self, questions: dict[str, list] | None = None, fail_fetch: bool = False):
+    def __init__(self, questions: dict[str, list] | None = None, fail_fetch: bool = False,
+                 fail_tournaments: tuple = ()):
         self.questions = questions if questions is not None else load_fixture_questions()
         self.fail_fetch = fail_fetch
+        self.fail_tournaments = set(fail_tournaments)
         self.predictions: list[tuple[str, int, object]] = []
         self.comments: list[tuple[int, str]] = []
         self.fail_comment_once: set[int] = set()
+        self.fail_comment_always: set[int] = set()
 
     async def get_questions_matching_filter(self, api_filter, num_questions=None, **kw):
         if self.fail_fetch:
             raise ConnectionError("fake fetch failure")
         (tid,) = api_filter.allowed_tournaments
+        if tid in self.fail_tournaments:
+            raise ConnectionError(f"fake fetch failure for {tid}")
         return [q.model_copy(deep=True) for q in self.questions.get(tid, [])]
 
     def post_binary_question_prediction(self, qid, p):
@@ -86,6 +91,8 @@ class FakeClient:
         self.predictions.append(("numeric", qid, cdf))
 
     def post_question_comment(self, post_id, text, is_private=True, included_forecast=True):
+        if post_id in self.fail_comment_always:
+            raise ConnectionError("fake comment outage")
         if post_id in self.fail_comment_once:
             self.fail_comment_once.discard(post_id)
             raise ConnectionError("fake comment failure")
@@ -98,6 +105,14 @@ TOURNAMENTS = [("FutureEval Fall 2026", "FutureEval Fall 2026"), ("MiniBench", "
 def _percentile_answer(values: list[float]) -> str:
     ps = [10, 20, 40, 60, 80, 90]
     return "\n".join(f"Percentile {p}: {v:f}" for p, v in zip(ps, values))
+
+
+class FakeOpenRouterError(Exception):
+    """Shaped like litellm's errors: carries an HTTP status_code."""
+
+    def __init__(self, status_code: int):
+        super().__init__(f"OpenrouterException - fake error {status_code}")
+        self.status_code = status_code
 
 
 class FakeLlmState:
@@ -118,6 +133,8 @@ def fake_llm(monkeypatch):
     async def fake_invoke(self, prompt, system_prompt=None):
         text = prompt if isinstance(prompt, str) else str(prompt)
         state.calls.append(text)
+        if "PAYMENT402" in text:
+            raise FakeOpenRouterError(402)
         if "ALWAYSFAILS" in text:
             raise RuntimeError("fake LLM outage for this question")
         if "FLAKY" in text and not state.flaky_seen:

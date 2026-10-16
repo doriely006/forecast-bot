@@ -1,0 +1,21 @@
+{
+  "main": {
+    "entries": [
+      {"user": {"id": 1, "username": "metac-gpt-5.4", "is_bot": true}, "rank": 1, "score": 900.0, "prize": 0, "contribution_count": 60},
+      {"user": {"id": 2, "username": "alpha-bot", "is_bot": true}, "rank": 2, "score": 800.0, "prize": 5000, "contribution_count": 60},
+      {"user": {"id": 3, "username": "metac-o3", "is_bot": true}, "rank": 3, "score": 700.0, "prize": 0, "contribution_count": 60},
+      {"user": {"id": 4, "username": "beta-bot", "is_bot": true}, "rank": 4, "score": 600.0, "prize": 3000, "contribution_count": 58},
+      {"user": {"id": 5, "username": "gamma-bot", "is_bot": true}, "rank": 5, "score": 300.0, "prize": 0, "contribution_count": 55},
+      {"user": {"id": 6, "username": "fixture-forecast-bot", "is_bot": true}, "rank": 6, "score": 120.0, "prize": 0, "contribution_count": 44},
+      {"user": {"id": 7, "username": "delta-bot", "is_bot": true}, "rank": 7, "score": -50.0, "prize": 0, "contribution_count": 41}
+    ]
+  },
+  "minibench_project": {"id": 33999, "slug": "minibench"},
+  "minibench": {
+    "entries": [
+      {"user": {"username": "fixture-forecast-bot", "is_bot": true}, "rank": 2, "score": 40.0, "prize": 120, "contribution_count": 20},
+      {"user": {"username": "metac-claude", "is_bot": true}, "rank": 1, "score": 55.0, "prize": 0, "contribution_count": 20},
+      {"user": {"username": "alpha-bot", "is_bot": true}, "rank": 3, "score": 10.0, "prize": 0, "contribution_count": 20}
+    ]
+  }
+}

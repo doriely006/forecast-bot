@@ -41,3 +41,29 @@ v0.1 定位＝「不犯錯的範本」：題題都交、不給極端值、數值
 - BACKLOG.md：收工日誌 ≤40 行＋v0.2 清單：standings 小工具（讀正賽／MiniBench 名次與獎金欄；第一輪 MiniBench 結算前要有；停損判準＝MiniBench 連兩輪後半段就停）、agentic 迭代搜尋、已結案相似題與預測市場查詢、跨家族 ensemble、Platt 校準、回測（避開 model cutoff 洩漏）。
 - docs/SPEC.md＝本檔副本。
 - push main。回報 ≤30 行：測試 PASS/FAIL 數＋log 路徑、model ID 與單價、每題估算成本、排程與月分鐘估算、沒做到的事、用了哪些預設。
+
+## §12 審查修正（v0.1.1，2026-10-16）
+本節取代上文衝突條文。條文全文在同目錄 `SPEC-amend-1.md`（A1–A5、B1–B14）與 `SPEC-amend-2.md`（C1–C10），這裡只列優先順序與落點，引用條號即可。
+優先順序：§12.3 主 session 覆寫 > amend-2 > amend-1 > §1–§11。
+
+### 12.1 amend-1（opus 對抗審查）
+- 開賽前必修 A1–A5：dry run 預設只列題（A1）、預算配速（A2）、comment 失敗計數＋下一輪補送（A3）、夾限只在 `_aggregate_predictions`（A4）、cron 不放整點（A5；頭 48 小時只列題已被 C4 取消）。
+- v0.1 應修 B1–B14。B2 的跨輪持久化已被 C5 取消，只留「不送 0.5 或寬分布當退回值」與輪內重試。
+- 留 v0.2：Date／Conditional 題型、配速是否偏重 MiniBench（見 BACKLOG）。
+
+### 12.2 amend-2（Fable 第三輪審查）
+- C1 排程每 30 分（已被 12.3 覆寫成每 20 分）；C2 最終預測 model 預設 `openai/gpt-5.6-terra`、退回 `openai/gpt-5.4`，研究與解析 `openai/gpt-5.4-mini`，兩賽事可各自指定；C3 key 沒上限不拒跑、改用 usage 配速並標黃；C4 取消 48 小時只列題，Test Bot 3 題過了就可開 PUBLISH；C5 取消 B2 跨輪持久化；C6 額度分配日與比例做成 config；C7 standings 小工具與停損（正賽累計 40 題結算後、非 metac bot 名次後 50% 就停或換 model）；C8 README「只有你能做的事」；C9 文件數字對齊配速版；C10 見下。
+- C10：正賽與 MiniBench 是兩個獨立排行榜，MiniBench 用便宜設定只影響加碼機會，不影響正賽分數。
+
+### 12.3 主 session 覆寫（2026-10-16，repo 已改為 PUBLIC）
+1. 開頭「repo 維持私人」作廢。排程每 20 分鐘 cron `"7,27,47 * * * *"`（取代 C1）；README 月分鐘估算改為「公開 repo 標準 runner 免費」。
+2. 公開 repo 的排程 60 天沒 commit 會被 GitHub 停用：最後一次 commit 超過 45 天 summary 標黃；repo 被改回私人（`github.event.repository.private`）summary 標黃。
+3. 不加任何 pull_request／pull_request_target 觸發；workflow 保持 `permissions: contents: read`。
+4. README「只有你能做的事」：參加表單 open source 欄答「是」並附 https://github.com/doriely006/forecast-bot ；其餘照 C8。
+5. 本節即合併結果；amend 檔與 RESEARCH.md 一併進 repo。
+6. 版號 0.1.1。
+
+### 12.4 實作時的判斷（v0.1.1 交付時記錄）
+- A3 補送：comment 原文在送預測前先寫進 `.state/`（actions/cache 跨輪保存），comment 確認送達才刪；下一輪 precheck 原文補送、不叫 LLM，失敗 24 輪後放棄並標紅。這不是 B2 的失敗計數，C5 不影響。
+- B14：閒置輪的判斷放在只用標準函式庫的 `precheck.py`；Conditional 題（賽制不出）列出但不算新題，避免每輪都誤判有工作。
+- B1：job 只在系統性問題變紅（開關值錯、token 被拒、兩邊都抓不到題、需要 LLM 時 OpenRouter 401／402／讀不到、全部題目失敗、全部 comment 失敗）。

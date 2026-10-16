@@ -12,7 +12,6 @@ import argparse
 import asyncio
 import logging
 import os
-import re
 import sys
 from datetime import datetime, timezone
 from typing import Any
@@ -50,53 +49,10 @@ import guards  # noqa: E402
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
-# ------------------------------------------------------------------ models
-# Preferred OpenRouter model IDs. If an ID disappears from OpenRouter's public
-# model list, resolve_models() falls back to the newest GPT-5.x of the same kind.
-PREFERRED_MAIN = "openai/gpt-5.4"
-PREFERRED_CHEAP = "openai/gpt-5.4-mini"
-
-# Used only when the public model list cannot be read (USD per token).
-FALLBACK_PRICES = {
-    "openai/gpt-5.4": (2.5e-6, 15e-6),
-    "openai/gpt-5.4-mini": (0.75e-6, 4.5e-6),
-}
-
-_MAIN_RE = re.compile(r"^openai/gpt-5(\.\d+)?$")
-_CHEAP_RE = re.compile(r"^openai/gpt-5(\.\d+)?-mini$")
-
-
-def resolve_models(models: list[dict[str, Any]] | None) -> tuple[str, str]:
-    """Pick (main, cheap) model IDs from OpenRouter's /models payload."""
-    if not models:
-        return PREFERRED_MAIN, PREFERRED_CHEAP
-    ids = {m["id"]: m for m in models}
-
-    def pick(preferred: str, pattern: re.Pattern[str]) -> str:
-        if preferred in ids:
-            return preferred
-        candidates = [m for i, m in ids.items() if pattern.match(i)]
-        if not candidates:
-            return preferred
-        return max(candidates, key=lambda m: m.get("created", 0))["id"]
-
-    return pick(PREFERRED_MAIN, _MAIN_RE), pick(PREFERRED_CHEAP, _CHEAP_RE)
-
-
-def model_prices(
-    models: list[dict[str, Any]] | None, model_ids: list[str]
-) -> dict[str, tuple[float, float]]:
-    prices: dict[str, tuple[float, float]] = {}
-    by_id = {m["id"]: m for m in (models or [])}
-    for mid in model_ids:
-        if mid in by_id:
-            p = by_id[mid].get("pricing", {})
-            prices[mid] = (float(p.get("prompt", 0)), float(p.get("completion", 0)))
-        elif mid in FALLBACK_PRICES:
-            prices[mid] = FALLBACK_PRICES[mid]
-    return prices
+# Model choice (explicit candidate lists, per-tournament config) lives in
+# budget.py so the light precheck step can use it without dependencies.
 
 
 def register_prices_with_litellm(prices: dict[str, tuple[float, float]]) -> None:
@@ -117,9 +73,9 @@ def register_prices_with_litellm(prices: dict[str, tuple[float, float]]) -> None
 
 
 def _web_search_llm(model_id: str) -> GeneralLlm:
-    # OpenRouter web plugin pinned to the provider's NATIVE search (OpenAI /
-    # Anthropic). Equivalent to the ":online" suffix, but cannot silently fall
-    # back to Exa, which the donated credits do not cover.
+    # OpenRouter web plugin pinned to the provider's NATIVE search (B4). Unlike
+    # the ":online" suffix it cannot silently fall back to Exa, which the
+    # donated credits do not cover.
     return GeneralLlm(
         model=f"openrouter/{model_id}",
         temperature=None,
@@ -129,12 +85,13 @@ def _web_search_llm(model_id: str) -> GeneralLlm:
     )
 
 
-def build_llms(main_id: str, cheap_id: str, economy: bool) -> dict[str, Any]:
+def build_llms(forecast_id: str, cheap_id: str) -> dict[str, Any]:
+    """Final forecasts on `forecast_id`; research, summary and parsing on the cheap model (C2)."""
     return {
         "default": GeneralLlm(
-            model=f"openrouter/{main_id}", temperature=None, timeout=300, allowed_tries=2
+            model=f"openrouter/{forecast_id}", temperature=None, timeout=300, allowed_tries=2
         ),
-        "researcher": _web_search_llm(cheap_id if economy else main_id),
+        "researcher": _web_search_llm(cheap_id),
         "summarizer": GeneralLlm(
             model=f"openrouter/{cheap_id}", temperature=None, timeout=120, allowed_tries=2
         ),
@@ -433,17 +390,15 @@ class ForecastBot2026(ForecastBot):
             num_validation_samples=self._structure_output_validation_samples,
         )
 
-    def _fallback_distribution(self, question: NumericQuestion) -> NumericDistribution:
-        pts = guards.wide_fallback_percentiles(
-            question.lower_bound, question.upper_bound, question.zero_point
-        )
-        return NumericDistribution.from_question(
-            [Percentile(percentile=p, value=v) for p, v in pts], question
-        )
-
     async def _run_forecast_on_numeric(
         self, question: NumericQuestion, research: str
     ) -> ReasonedPrediction[NumericDistribution]:
+        """
+        One forecaster. A median that looks like a unit error is re-asked once;
+        if it is still wrong this forecaster FAILS (B2: no wide/0.5 fallback is
+        ever submitted). The SDK aggregates the forecasters that succeeded, and
+        fails the question when fewer than half succeed.
+        """
         llm = self.get_llm("default", "llm")
         lo, hi = question.lower_bound, question.upper_bound
         prompt = self._numeric_prompt(question, research)
@@ -466,46 +421,22 @@ class ForecastBot2026(ForecastBot):
                 """
             )
             reasoning2 = await llm.invoke(retry_prompt)
-            try:
-                percentiles2 = await self._parse_numeric(question, reasoning2)
-                median2 = guards.implied_median(
-                    [(p.percentile, p.value) for p in percentiles2]
+            percentiles2 = await self._parse_numeric(question, reasoning2)
+            median2 = guards.implied_median([(p.percentile, p.value) for p in percentiles2])
+            if guards.looks_like_unit_error(median2, lo, hi):
+                raise ValueError(
+                    f"unit error twice (median {median:g}, then {median2:g}, range {lo:g}-{hi:g}); "
+                    "this forecaster is dropped"
                 )
-            except Exception:
-                percentiles2, median2 = None, float("nan")
-            if percentiles2 is not None and not guards.looks_like_unit_error(
-                median2, lo, hi
-            ):
-                note = (
-                    f"one forecaster's median {median:g} looked like a unit error "
-                    f"(range {lo:g}-{hi:g}); re-asked, new median {median2:g}"
-                )
-                self.add_guard_note(question, note)
-                reasoning = f"{reasoning2}\n\n[guardrail] {note}"
-                percentiles = percentiles2
-            else:
-                note = (
-                    f"one forecaster answered median {median:g}, then {median2:g}, "
-                    f"for range {lo:g}-{hi:g} (unit error twice); that forecaster's "
-                    "answer was replaced by a wide distribution over the range"
-                )
-                self.add_guard_note(question, note)
-                return ReasonedPrediction(
-                    prediction_value=self._fallback_distribution(question),
-                    reasoning=f"{reasoning}\n\n{reasoning2}\n\n[guardrail] {note}",
-                )
-        try:
-            dist = NumericDistribution.from_question(percentiles, question)
-        except ValueError as e:
             note = (
-                "one forecaster's distribution was rejected by validation "
-                f"({str(e)[:120]}); replaced by a wide distribution over the range"
+                f"one forecaster's median {median:g} looked like a unit error "
+                f"(range {lo:g}-{hi:g}); re-asked, new median {median2:g}"
             )
             self.add_guard_note(question, note)
-            return ReasonedPrediction(
-                prediction_value=self._fallback_distribution(question),
-                reasoning=f"{reasoning}\n\n[guardrail] {note}",
-            )
+            reasoning = f"{reasoning2}\n\n[guardrail] {note}"
+            percentiles = percentiles2
+        # CDF validity (monotonic, bounds, minimum step) is the SDK's job (B8).
+        dist = NumericDistribution.from_question(percentiles, question)
         return ReasonedPrediction(prediction_value=dist, reasoning=reasoning)
 
     # ----------------------------------------------------------------- date
@@ -578,36 +509,17 @@ class ForecastBot2026(ForecastBot):
                 ]
             )
 
-        if isinstance(question, (NumericQuestion, DateQuestion)):
-            problems: list[str]
-            try:
-                cdf = [p.percentile for p in aggregate.get_cdf()]
-                problems = guards.cdf_problems(
-                    cdf,
-                    question.open_lower_bound,
-                    question.open_upper_bound,
-                    question.cdf_size,
+        if isinstance(question, NumericQuestion):
+            # Single unit check on the aggregate (B8). CDF validity is left to
+            # the SDK, which standardizes the CDF when it is built.
+            median = guards.implied_median(
+                [(p.percentile, p.value) for p in aggregate.get_cdf()]
+            )
+            if guards.looks_like_unit_error(median, question.lower_bound, question.upper_bound):
+                raise ValueError(
+                    f"aggregate median {median:g} looks like a unit error "
+                    f"(range {question.lower_bound:g}-{question.upper_bound:g}); not submitted"
                 )
-            except Exception as e:
-                problems = [f"could not build cdf: {e.__class__.__name__}"]
-            if isinstance(question, NumericQuestion) and not problems:
-                median = guards.implied_median(
-                    [(p.percentile, p.value) for p in aggregate.get_cdf()]
-                )
-                if guards.looks_like_unit_error(
-                    median, question.lower_bound, question.upper_bound
-                ):
-                    problems.append(f"aggregate median {median:g} looks like a unit error")
-            if problems and isinstance(question, NumericQuestion):
-                self.add_guard_note(
-                    question,
-                    "aggregate failed final checks ("
-                    + "; ".join(problems)
-                    + ") -> submitted a wide distribution over the range instead",
-                )
-                return self._fallback_distribution(question)
-            if problems:
-                raise ValueError(f"Date forecast failed final checks: {problems}")
             return aggregate
 
         return aggregate
@@ -644,46 +556,25 @@ class ForecastBot2026(ForecastBot):
 # --------------------------------------------------------------------- CLI
 
 
-def fetch_openrouter_models() -> list[dict[str, Any]] | None:
-    """Public endpoint, no key needed. None if unreachable."""
-    import requests
-
-    try:
-        resp = requests.get("https://openrouter.ai/api/v1/models", timeout=30)
-        resp.raise_for_status()
-        return resp.json()["data"]
-    except Exception as e:
-        logger.warning(f"Could not read OpenRouter model list: {e.__class__.__name__}")
-        return None
-
-
-def make_bot(
-    main_id: str, cheap_id: str, economy: bool, client: Any
-) -> ForecastBot2026:
+def make_bot(forecast_id: str, cheap_id: str, forecasts: int, client: Any) -> ForecastBot2026:
     return ForecastBot2026(
         research_reports_per_question=1,
-        predictions_per_research_report=3 if economy else 5,
+        predictions_per_research_report=forecasts,
         use_research_summary_to_forecast=False,
-        publish_reports_to_metaculus=False,  # runner.py publishes, with its own retries
+        publish_reports_to_metaculus=False,  # runner.py publishes (forecast, then comment)
         folder_to_save_reports_to=None,
         skip_previously_forecasted_questions=False,  # runner.py filters and counts
         extra_metadata_in_explanation=True,
-        llms=build_llms(main_id, cheap_id, economy),
+        llms=build_llms(forecast_id, cheap_id),
         metaculus_client=client,
-    )
-
-
-def models_label(main_id: str, cheap_id: str) -> str:
-    asknews = "on" if os.getenv("ASKNEWS_CLIENT_ID") and os.getenv("ASKNEWS_SECRET") else "off"
-    return (
-        f"`{main_id}` x5 forecasts (x3 in economy mode); research `{main_id}` "
-        f"(economy: `{cheap_id}`) + native web search; parsing/summary `{cheap_id}`; AskNews {asknews}"
     )
 
 
 def cli(argv: list[str] | None = None) -> int:
     import budget
+    import precheck
     import runner
+    import state
     from bot_helpers import check_environment
     from forecasting_tools import MetaculusClient
 
@@ -692,31 +583,63 @@ def cli(argv: list[str] | None = None) -> int:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
     parser = argparse.ArgumentParser(description="forecast-bot")
-    parser.add_argument(
-        "--mode", choices=["tournament", "test_questions"], default="tournament"
-    )
+    parser.add_argument("--mode", choices=["tournament", "test_questions"], default="tournament")
     args = parser.parse_args(argv)
-    check_environment(strict=True)
-    publish = runner.env_flag("PUBLISH")
+    env = dict(os.environ)
+    publish = env.get("PUBLISH", "") == "1"
+    with_header = env.get("SUMMARY_HEADER_DONE", "") != "1"
+    errors = precheck.validate_switches(env, env.get("GITHUB_EVENT_NAME"))
+    if errors:
+        runner.write_summary(runner.render_crash(VERSION, publish, "; ".join(errors), with_header))
+        return 1
     print(f"forecast-bot v{VERSION} mode={args.mode} publish={'yes' if publish else 'no (dry run)'}")
 
-    models = fetch_openrouter_models()
-    main_id, cheap_id = resolve_models(models)
-    register_prices_with_litellm(model_prices(models, [main_id, cheap_id]))
-    client = MetaculusClient()
-    result = asyncio.run(
-        runner.run(
-            mode=args.mode,
-            publish=publish,
-            bot_factory=lambda economy: make_bot(main_id, cheap_id, economy, client),
-            client=client,
-            key_info_fn=lambda: budget.fetch_key_info(os.getenv("OPENROUTER_API_KEY")),
-            version=VERSION,
-            models_label=models_label(main_id, cheap_id),
+    result = None
+    crash = "stopped before the run finished"
+    try:
+        check_environment(strict=True)
+        models = budget.fetch_models()
+        cheap_id = budget.pick_model(models, budget.CHEAP_CANDIDATES)
+        forecast_ids = {
+            "main": budget.pick_model(models, budget.FORECAST_CANDIDATES, env.get("MAIN_FORECAST_MODEL")),
+            "minibench": budget.pick_model(
+                models, budget.FORECAST_CANDIDATES, env.get("MINIBENCH_FORECAST_MODEL")
+            ),
+        }
+        prices = budget.model_prices(models, sorted({*forecast_ids.values(), cheap_id}))
+        register_prices_with_litellm(prices)
+        client = MetaculusClient()
+        store = (
+            state.PendingComments.load(state.state_dir(env))
+            if publish and args.mode == "tournament"
+            else None
         )
-    )
-    runner.write_summary(runner.render_summary(result))
-    return result.exit_code
+        result = asyncio.run(
+            runner.run(
+                mode=args.mode,
+                publish=publish,
+                bot_factory=lambda kind, tier: make_bot(
+                    forecast_ids[kind], cheap_id, tier.forecasts, client
+                ),
+                client=client,
+                key_lookup_fn=lambda: budget.fetch_key_info(env.get("OPENROUTER_API_KEY")),
+                version=VERSION,
+                models={k: (forecast_ids[k], cheap_id) for k in budget.KINDS},
+                prices={k: (prices[forecast_ids[k]], prices[cheap_id]) for k in budget.KINDS},
+                env=env,
+                store=store,
+            )
+        )
+        crash = ""
+    except Exception as e:
+        crash = f"{e.__class__.__name__}: {str(e)[:300]}"
+    finally:
+        # B1: the summary is written whatever happened.
+        if result is not None and not crash:
+            runner.write_summary(runner.render_summary(result, with_header))
+        else:
+            runner.write_summary(runner.render_crash(VERSION, publish, crash, with_header))
+    return result.exit_code if result is not None and not crash else 1
 
 
 if __name__ == "__main__":

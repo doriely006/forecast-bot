@@ -1,6 +1,6 @@
 """
-One bot run: budget check -> fetch every open question -> forecast the new
-ones -> (optionally) publish -> write the GitHub job summary.
+One forecasting run: budget + pacing -> fetch every open question -> forecast
+the new ones -> (optionally) publish forecast, then comment -> job summary.
 
 Everything with side effects is injected, so tests run fully offline.
 """
@@ -9,53 +9,55 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable
+from datetime import date, datetime, timezone
+from typing import Any, Callable
 
 import budget
+import precheck
 
 logger = logging.getLogger(__name__)
 
-PER_QUESTION_RETRIES = 2  # extra attempts after the first one
+PER_QUESTION_RETRIES = 2  # extra attempts within one run (C5: nothing carried across runs)
 PUBLISH_ATTEMPTS = 3
+COMMENT_ATTEMPTS = 3
 MAX_QUESTIONS_TO_FETCH = 2000
 
 
 def env_flag(name: str, env: dict[str, str] | None = None) -> bool:
     env = os.environ if env is None else env
-    return env.get(name, "").strip() == "1"
+    return env.get(name, "") == "1"  # B5: only "1" is on
 
 
 def tournaments_for_mode(mode: str) -> list[tuple[str, int | str]]:
-    from forecasting_tools import MetaculusClient
-
     if mode == "tournament":
-        return [
-            ("FutureEval Fall 2026", MetaculusClient.CURRENT_AI_COMPETITION_ID),
-            ("MiniBench", MetaculusClient.CURRENT_MINIBENCH_ID),
-        ]
+        return list(precheck.TOURNAMENTS)
     if mode == "test_questions":
         return [("bot-testing-area", "bot-testing-area")]
     raise ValueError(f"Unknown mode {mode}")
 
 
+def _int_env(env: dict[str, str], name: str, default: int) -> int:
+    raw = env.get(name, "")
+    return int(raw) if raw else default
+
+
 def max_forecasts_for(mode: str, publish: bool, env: dict[str, str]) -> int | None:
     """
-    None = no cap. Defaults:
-      tournament + publish   -> no cap (never skip a question)
-      tournament + dry run   -> 0 (scheduled dry runs only list questions;
-                                otherwise they would re-forecast the same
-                                questions every hour and burn credits)
-      test_questions         -> 3
-    Override with MAX_FORECASTS_PER_RUN.
+    None = no cap (publishing: never skip a question).
+      test_questions          -> TEST_MAX_QUESTIONS, default 3 (B7)
+      tournament dry run      -> 0: only list questions (A1). A manual run
+                                 with DRY_RUN_LLM=1 forecasts up to
+                                 DRY_RUN_LLM_MAX_QUESTIONS (default 2).
     """
-    raw = env.get("MAX_FORECASTS_PER_RUN", "").strip()
-    if raw:
-        return int(raw)
     if mode == "test_questions":
-        return 3
-    return None if publish else 0
+        return _int_env(env, "TEST_MAX_QUESTIONS", 3)
+    if publish:
+        return None
+    if env.get("DRY_RUN_LLM", "") == "1" and env.get("GITHUB_EVENT_NAME", "") != "schedule":
+        return _int_env(env, "DRY_RUN_LLM_MAX_QUESTIONS", 2)
+    return 0
 
 
 async def fetch_open_questions(client: Any, tournament_id: int | str) -> list[Any]:
@@ -74,12 +76,63 @@ async def fetch_open_questions(client: Any, tournament_id: int | str) -> list[An
     )
 
 
+def is_supported(question: Any) -> bool:
+    from forecasting_tools import BinaryQuestion, DateQuestion, MultipleChoiceQuestion, NumericQuestion
+
+    return isinstance(question, (BinaryQuestion, MultipleChoiceQuestion, NumericQuestion, DateQuestion))
+
+
+_FATAL_PATTERNS = [
+    (re.compile(r'"code"\s*:\s*(40[12])\b'), None),
+    (re.compile(r"(?:status[_ ]?code|error code|HTTP)\D{0,3}(40[12])\b", re.I), None),
+    (re.compile(r"requires more credits|insufficient credits|insufficient balance", re.I), 402),
+]
+
+
+def llm_fatal_status(err: Any) -> int | None:
+    """401/402 from OpenRouter anywhere in an exception (chain, group) or text (B1, B3)."""
+    seen: set[int] = set()
+    stack = [err]
+    while stack:
+        e = stack.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        if isinstance(e, BaseException):
+            code = getattr(e, "status_code", None)
+            if code in (401, 402):
+                return int(code)
+            stack += list(getattr(e, "exceptions", ()) or ())
+            stack += [e.__cause__, e.__context__]
+            text = str(e)
+        else:
+            text = str(e)
+        for pattern, fixed in _FATAL_PATTERNS:
+            m = pattern.search(text)
+            if m:
+                return fixed or int(m.group(1))
+    return None
+
+
+def root_message(e: BaseException, limit: int = 200) -> str:
+    """Innermost cause of an SDK error (it wraps everything in ExceptionGroups)."""
+    while True:
+        inner = getattr(e, "exceptions", None)
+        if inner:
+            e = inner[0]
+        elif e.__cause__ is not None:
+            e = e.__cause__
+        else:
+            break
+    return f"{e.__class__.__name__}: {str(e)[:limit]}"
+
+
 @dataclass
 class Outcome:
     tournament: str
     title: str
     url: str
-    status: str  # submitted | dry_run | failed | skipped_budget
+    status: str  # submitted | comment_failed | dry_run | failed | skipped_budget | stopped
     detail: str = ""
     cost: float = 0.0
 
@@ -89,25 +142,33 @@ class RunResult:
     version: str
     mode: str
     publish: bool
-    models: str
     decision: budget.BudgetDecision
+    models: dict[str, tuple[str, str]] = field(default_factory=dict)
+    pacing: budget.Pacing | None = None
     open_counts: dict[str, int] = field(default_factory=dict)
     already_forecasted: int = 0
+    unsupported: int = 0
     not_attempted_cap: int = 0
     fetch_errors: list[str] = field(default_factory=list)
+    fetch_auth_error: bool = False
     outcomes: list[Outcome] = field(default_factory=list)
     windows: list[tuple[str, str, str, str, str]] = field(default_factory=list)
+    llm_needed: bool = False
+    fatal: str = ""  # OpenRouter 401/402 mid-run: everything stopped (B3)
     usage_before: float | None = None
     usage_after: float | None = None
     remaining_after: float | None = None
 
+    def count(self, *statuses: str) -> int:
+        return sum(o.status in statuses for o in self.outcomes)
+
     @property
     def new_ok(self) -> int:
-        return sum(o.status in ("submitted", "dry_run") for o in self.outcomes)
+        return self.count("submitted", "comment_failed", "dry_run")
 
     @property
     def failed(self) -> int:
-        return sum(o.status == "failed" for o in self.outcomes)
+        return self.count("failed")
 
     @property
     def spend(self) -> float:
@@ -116,13 +177,26 @@ class RunResult:
         return sum(o.cost for o in self.outcomes)
 
     @property
-    def exit_code(self) -> int:
-        if self.decision.red or self.fetch_errors:
-            return 1
-        attempted = [o for o in self.outcomes if o.status != "skipped_budget"]
+    def systemic(self) -> list[str]:
+        """Reasons that turn the job red (B1). Single-question failures do not."""
+        out = []
+        if self.fatal:
+            out.append(self.fatal)
+        if self.llm_needed and self.decision.systemic:
+            out.append(f"OpenRouter: {self.decision.reason}")
+        if self.fetch_auth_error or (self.fetch_errors and not self.open_counts):
+            out.append("could not load questions: " + "; ".join(self.fetch_errors))
+        attempted = [o for o in self.outcomes if o.status not in ("skipped_budget", "stopped")]
         if attempted and all(o.status == "failed" for o in attempted):
-            return 1
-        return 0
+            out.append(f"every attempted question failed ({len(attempted)})")
+        published = [o for o in self.outcomes if o.status in ("submitted", "comment_failed")]
+        if published and all(o.status == "comment_failed" for o in published):
+            out.append("no comment could be sent")
+        return out
+
+    @property
+    def exit_code(self) -> int:
+        return 1 if self.systemic else 0
 
 
 def _iso(d: datetime | None) -> str:
@@ -138,28 +212,33 @@ async def run(
     *,
     mode: str,
     publish: bool,
-    bot_factory: Callable[[bool], Any],
+    bot_factory: Callable[[str, budget.Tier], Any],
     client: Any,
-    key_info_fn: Callable[[], budget.KeyInfo | None],
+    key_lookup_fn: Callable[[], budget.KeyLookup],
     version: str,
-    models_label: str,
+    models: dict[str, tuple[str, str]],
+    prices: dict[str, tuple[tuple[float, float], tuple[float, float]]],
     env: dict[str, str] | None = None,
     tournaments: list[tuple[str, int | str]] | None = None,
     concurrency: int = 3,
+    store: Any = None,
+    today: date | None = None,
 ) -> RunResult:
     env = dict(os.environ) if env is None else env
-    info = key_info_fn()
-    decision = budget.decide(info, env)
-    result = RunResult(version, mode, publish, models_label, decision)
-    result.usage_before = info.usage if info else None
+    lookup = key_lookup_fn()
+    decision = budget.decide(lookup, env)
+    result = RunResult(version, mode, publish, decision, models)
+    result.usage_before = lookup.info.usage if lookup.info else None
     skip_forecasted = mode == "tournament"
 
     to_forecast: list[tuple[str, Any]] = []
     seen: set[Any] = set()
     for name, tid in tournaments or tournaments_for_mode(mode):
-        try:
+        try:  # B12: one tournament failing does not block the other
             questions = await fetch_open_questions(client, tid)
         except Exception as e:
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            result.fetch_auth_error |= code in (401, 403)
             result.fetch_errors.append(f"{name}: {e.__class__.__name__}: {str(e)[:200]}")
             continue
         result.open_counts[name] = len(questions)
@@ -173,35 +252,62 @@ async def run(
             seen.add(key)
             if skip_forecasted and q.already_forecasted:
                 result.already_forecasted += 1
-                continue
-            to_forecast.append((name, q))
+            elif not is_supported(q):
+                result.unsupported += 1
+            else:
+                to_forecast.append((name, q))
 
     to_forecast.sort(key=_close_key)  # closing soonest first
+    if decision.remaining is not None:
+        open_new = {k: 0 for k in budget.KINDS}
+        for name, _ in to_forecast:
+            open_new[budget.kind_of(name)] += 1
+        result.pacing = budget.pace(decision.remaining, today or budget.utc_today(), env, open_new, prices)
     cap = max_forecasts_for(mode, publish, env)
     if cap is not None and len(to_forecast) > cap:
         result.not_attempted_cap = len(to_forecast) - cap
         to_forecast = to_forecast[:cap]
+    result.llm_needed = bool(to_forecast)
 
-    if not decision.may_call_llm:
+    if to_forecast and (not decision.may_call_llm or result.pacing is None):
         result.outcomes = [
             Outcome(n, q.question_text[:80], q.page_url, "skipped_budget", decision.reason)
             for n, q in to_forecast
         ]
     elif to_forecast:
-        bot = bot_factory(decision.state == "economy")
+        assert result.pacing is not None
+        bots = {k: bot_factory(k, result.pacing.kinds[k].tier) for k in budget.KINDS}
         sem = asyncio.Semaphore(concurrency)
+        stop = asyncio.Event()
 
         async def one(name: str, q: Any) -> Outcome:
             async with sem:
-                return await forecast_one(bot, client, name, q, publish, key_info_fn, env)
+                return await forecast_one(
+                    bots[budget.kind_of(name)], client, name, q, publish, key_lookup_fn, env, stop, result, store
+                )
 
         result.outcomes = list(await asyncio.gather(*[one(n, q) for n, q in to_forecast]))
 
-    after = key_info_fn() if (decision.may_call_llm and to_forecast) else info
+    after = key_lookup_fn().info if (decision.may_call_llm and to_forecast) else lookup.info
     if after is not None:
         result.usage_after = after.usage
         result.remaining_after = after.remaining
     return result
+
+
+class _ForecastOnlyClient:
+    """Lets the SDK post the forecast exactly as it would, but holds back the
+    comment so it can be sent (and retried, and stored) separately (A3)."""
+
+    def __init__(self, real: Any):
+        self._real = real
+        self.comment: tuple[Any, ...] | None = None
+
+    def post_question_comment(self, *args: Any, **kwargs: Any) -> None:
+        self.comment = args
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
 
 
 async def forecast_one(
@@ -210,87 +316,157 @@ async def forecast_one(
     tournament: str,
     question: Any,
     publish: bool,
-    key_info_fn: Callable[[], budget.KeyInfo | None],
+    key_lookup_fn: Callable[[], budget.KeyLookup],
     env: dict[str, str],
+    stop: asyncio.Event,
+    result: RunResult,
+    store: Any = None,
 ) -> Outcome:
     title, url = question.question_text[:80], question.page_url
-    live = budget.decide(key_info_fn(), env)
+    if stop.is_set():
+        return Outcome(tournament, title, url, "stopped", result.fatal)
+    live = budget.decide(key_lookup_fn(), env)
     if not live.may_call_llm:
         return Outcome(tournament, title, url, "skipped_budget", live.reason)
 
     report = None
     errors: list[str] = []
     for attempt in range(1 + PER_QUESTION_RETRIES):
+        if stop.is_set():
+            return Outcome(tournament, title, url, "stopped", result.fatal)
         bot.guard_notes.pop(bot.question_key(question), None)
         try:
             report = (await bot.forecast_questions([question], return_exceptions=False))[0]
             break
         except Exception as e:
-            errors.append(f"attempt {attempt + 1}: {e.__class__.__name__}: {str(e)[:150]}")
+            errors.append(f"attempt {attempt + 1}: {root_message(e)}")
             logger.warning(f"Forecast failed for {url}: {errors[-1]}")
+            status = llm_fatal_status(e)
+            if status:  # B3: no retry, the whole run stops
+                result.fatal = result.fatal or f"OpenRouter HTTP {status}: run stopped, nothing else attempted"
+                stop.set()
+                return Outcome(tournament, title, url, "failed", " | ".join(errors))
     if report is None:
         return Outcome(tournament, title, url, "failed", " | ".join(errors))
+    status = llm_fatal_status(" ".join(report.errors or []))
+    if status:  # some forecasters hit 401/402 but enough succeeded: keep this one, stop the rest
+        result.fatal = result.fatal or f"OpenRouter HTTP {status}: run stopped, nothing else attempted"
+        stop.set()
 
+    cost = report.price_estimate or 0.0
     if not publish:
-        return Outcome(tournament, title, url, "dry_run", "", report.price_estimate or 0.0)
+        return Outcome(tournament, title, url, "dry_run", "", cost)
+    return await publish_one(report, client, tournament, store, cost)
 
+
+async def publish_one(report: Any, client: Any, tournament: str, store: Any, cost: float) -> Outcome:
+    q = report.question
+    title, url, post_id = q.question_text[:80], q.page_url, q.id_of_post
+    errors: list[str] = []
+    if store is not None:
+        store.add(post_id, report.explanation, url)  # write-ahead (A3)
+    held = _ForecastOnlyClient(client)
     for attempt in range(PUBLISH_ATTEMPTS):
         try:
-            await report.publish_report_to_metaculus(metaculus_client=client)
-            return Outcome(tournament, title, url, "submitted", "", report.price_estimate or 0.0)
+            await report.publish_report_to_metaculus(metaculus_client=held)
+            break
         except Exception as e:
-            errors.append(f"publish {attempt + 1}: {e.__class__.__name__}: {str(e)[:150]}")
-            logger.warning(f"Publish failed for {url}: {errors[-1]}")
-    return Outcome(tournament, title, url, "failed", " | ".join(errors), report.price_estimate or 0.0)
+            errors.append(f"forecast {attempt + 1}: {e.__class__.__name__}: {str(e)[:150]}")
+            logger.warning(f"Publishing forecast failed for {url}: {errors[-1]}")
+    else:
+        if store is not None:
+            store.remove(post_id)
+        return Outcome(tournament, title, url, "failed", " | ".join(errors), cost)
+
+    text = held.comment[1] if held.comment else report.explanation
+    for attempt in range(COMMENT_ATTEMPTS):
+        try:
+            client.post_question_comment(post_id, text)
+            if store is not None:
+                store.remove(post_id)
+            return Outcome(tournament, title, url, "submitted", "", cost)
+        except Exception as e:
+            errors.append(f"comment {attempt + 1}: {e.__class__.__name__}: {str(e)[:150]}")
+            logger.warning(f"Posting comment failed for {url}: {errors[-1]}")
+    if store is not None:
+        store.mark_attempt(post_id, errors[-1])
+    return Outcome(tournament, title, url, "comment_failed", " | ".join(errors), cost)
 
 
 def _money(x: float | None) -> str:
     return "n/a" if x is None else f"${x:.2f}"
 
 
-def render_summary(r: RunResult) -> str:
-    lines: list[str] = [f"## forecast-bot v{r.version}", ""]
-    mode_line = "PUBLISH (forecasts and comments are sent)" if r.publish else "DRY RUN (nothing is sent to Metaculus)"
-    lines.append(f"- Mode: `{r.mode}`, {mode_line}")
-    lines.append(f"- Models: {r.models}")
-    if r.decision.red:
-        lines += [
-            "",
-            "> [!CAUTION]",
-            f"> **BUDGET STOP ({r.decision.state})**: {r.decision.reason}. No LLM calls were made.",
-            "",
-        ]
-    else:
-        lines.append(f"- Budget: {r.decision.state} ({r.decision.reason})")
-    for err in r.fetch_errors:
-        lines += ["", "> [!CAUTION]", f"> **Could not load questions**: {err}", ""]
-    total_open = sum(r.open_counts.values())
-    counts = ", ".join(f"{k}: {v}" for k, v in r.open_counts.items()) or "none"
+def _block(kind: str, text: str) -> list[str]:
+    return ["", f"> [!{kind}]", f"> {text}", ""]
+
+
+def _asknews() -> str:
+    return "on" if os.getenv("ASKNEWS_CLIENT_ID") and os.getenv("ASKNEWS_SECRET") else "off"
+
+
+def render_summary(r: RunResult, with_header: bool = True) -> str:
+    lines: list[str] = [precheck.summary_header(r.publish), ""] if with_header else []
+    lines += [f"## forecast-bot v{r.version}：預測", ""]
+    lines.append(f"- 模式：`{r.mode}`" + ("" if r.publish else "（DRY RUN，什麼都不送）"))
+    if r.models:
+        cheap = next(iter(r.models.values()))[1]
+        per = []
+        for k, (fid, _) in r.models.items():
+            n = f" x{r.pacing.kinds[k].tier.forecasts}" if r.pacing else ""
+            per.append(f"{k} `{fid}`{n}")
+        lines.append(f"- 模型：{'；'.join(per)}；研究／解析 `{cheap}`＋原生搜尋；AskNews {_asknews()}")
+    for reason in r.systemic:
+        lines += _block("CAUTION", f"**停止／系統性問題**：{reason}")
+    if r.decision.warning:
+        lines += _block("WARNING", r.decision.warning)
+    if r.fetch_errors and r.open_counts and not r.fetch_auth_error:
+        for err in r.fetch_errors:
+            lines += _block("WARNING", f"**抓題失敗（另一邊照跑）**：{err}")
+    comment_failed = r.count("comment_failed")
+    if comment_failed:
+        lines += _block("CAUTION", f"**{comment_failed} 題的說明（comment）沒送出去**，預測已送；下一輪會自動補送。")
+    lines.append(f"- OpenRouter：{r.decision.state}（{r.decision.reason}）")
+    if r.pacing:
+        parts = [f"{k} {_money(v.per_question_budget)}／題 -> {v.tier.name}" for k, v in r.pacing.kinds.items()]
+        run_out = r.pacing.run_out.isoformat() if r.pacing.run_out else "n/a"
+        lines.append(f"- 配速：{'；'.join(parts)}；預估見底日 {run_out}")
+    counts = "、".join(f"{k} {v}" for k, v in r.open_counts.items()) or "無"
     lines += [
-        f"- Open questions: {total_open} ({counts})",
-        f"- Already forecasted (skipped): {r.already_forecasted}",
-        f"- New forecasts this run: {r.new_ok}" + (" (dry run, not sent)" if not r.publish else ""),
-        f"- Failed: {r.failed}",
-        f"- Skipped for budget: {sum(o.status == 'skipped_budget' for o in r.outcomes)}",
+        f"- 開放題：{sum(r.open_counts.values())}（{counts}）",
+        f"- 已預測跳過：{r.already_forecasted}；不支援題型跳過：{r.unsupported}",
+        f"- 這輪新交：{r.new_ok}" + ("" if r.publish else "（dry run，沒送）"),
+        f"- 失敗：{r.failed}",
+        f"- 說明沒送出：{comment_failed}",
+        f"- 預算不足跳過：{r.count('skipped_budget')}；OpenRouter 停止後沒做：{r.count('stopped')}",
     ]
     if r.not_attempted_cap:
-        lines.append(f"- Not attempted (per-run cap): {r.not_attempted_cap}")
+        lines.append(f"- 這輪上限外沒做：{r.not_attempted_cap}")
     lines += [
-        f"- Estimated spend this run: {_money(r.spend)}",
-        f"- OpenRouter key remaining: {_money(r.remaining_after)}",
+        f"- 這輪估計花費：{_money(r.spend)}",
+        f"- OpenRouter 剩餘：{_money(r.remaining_after)}",
     ]
-    if r.failed:
-        lines += ["", "### Failed questions"]
-        lines += [f"- [{o.title}]({o.url}): {o.detail}" for o in r.outcomes if o.status == "failed"]
-    done = [o for o in r.outcomes if o.status in ("submitted", "dry_run")]
+    bad = [o for o in r.outcomes if o.status in ("failed", "comment_failed")]
+    if bad:
+        lines += ["", "### 失敗的題目"]
+        lines += [f"- [{o.title}]({o.url})（{o.status}）：{o.detail}" for o in bad]
+    done = [o for o in r.outcomes if o.status in ("submitted", "comment_failed", "dry_run")]
     if done:
-        lines += ["", "### Forecasted"]
-        lines += [f"- [{o.title}]({o.url}) ({o.tournament}, ~{_money(o.cost)})" for o in done]
-    if not r.publish and r.windows:
-        lines += ["", "### Open questions (open / close time, UTC)", "", "| tournament | question | opens | closes |", "|---|---|---|---|"]
+        lines += ["", "### 這輪預測的題目"]
+        lines += [f"- [{o.title}]({o.url})（{o.tournament}，約 {_money(o.cost)}）" for o in done]
+    if with_header and r.windows:  # no precheck listing above (Test Bot): print open/close times here (C4)
+        lines += ["", "<details><summary>開放中的題目（開放／截止時間，UTC）</summary>", "",
+                  "| tournament | question | opens | closes |", "|---|---|---|---|"]
         for t, title, url, op, cl in r.windows:
-            safe = title.replace("|", "/")
-            lines.append(f"| {t} | [{safe}]({url}) | {op} | {cl} |")
+            lines.append(f"| {t} | [{title.replace('|', '/')}]({url}) | {op} | {cl} |")
+        lines += ["", "</details>"]
+    return "\n".join(lines) + "\n"
+
+
+def render_crash(version: str, publish: bool, reason: str, with_header: bool = True) -> str:
+    lines = [precheck.summary_header(publish), ""] if with_header else []
+    lines += [f"## forecast-bot v{version}：預測", ""]
+    lines += _block("CAUTION", f"**這輪沒跑完**：{reason}")
     return "\n".join(lines) + "\n"
 
 

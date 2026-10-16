@@ -1,5 +1,6 @@
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -17,15 +18,18 @@ def load(name):
 
 
 def evaluate_job_if(expr: str, event: str, variables: dict) -> bool:
-    """Tiny evaluator for the `a == 'x' || b == 'y'` form used in our workflows."""
+    """Tiny evaluator for the `a == 'x' || b != ''` form used in our workflows."""
     def term(t: str) -> bool:
-        left, right = [s.strip() for s in t.split("==")]
+        op = "!=" if "!=" in t else "=="
+        left, right = [s.strip() for s in t.split(op)]
         value = right.strip("'")
         if left.startswith("vars."):
-            return variables.get(left[5:], "") == value
-        if left == "github.event_name":
-            return event == value
-        raise AssertionError(f"unsupported term {t}")
+            actual = variables.get(left[5:], "")
+        elif left == "github.event_name":
+            actual = event
+        else:
+            raise AssertionError(f"unsupported term {t}")
+        return (actual == value) if op == "==" else (actual != value)
 
     return any(term(t) for t in expr.split("||"))
 
@@ -37,16 +41,16 @@ def test_only_two_workflows():
 def test_schedule_skipped_when_bot_enabled_unset():
     job = load("tournament.yaml")["jobs"]["forecast_job"]
     expr = job["if"]
-    assert "vars.BOT_ENABLED == '1'" in expr
     assert evaluate_job_if(expr, "schedule", {}) is False
-    assert evaluate_job_if(expr, "schedule", {"BOT_ENABLED": "0"}) is False
+    # any other non-empty value starts the job so precheck.py can FAIL it with the reason (B5)
+    assert evaluate_job_if(expr, "schedule", {"BOT_ENABLED": "0"}) is True
     assert evaluate_job_if(expr, "schedule", {"BOT_ENABLED": "1"}) is True
     assert evaluate_job_if(expr, "workflow_dispatch", {}) is True
 
 
-def test_schedule_is_one_line_hourly_by_default():
+def test_schedule_every_20_minutes_never_on_the_hour():  # override 1, A5
     sched = load("tournament.yaml")["on"]["schedule"]
-    assert len(sched) == 1 and sched[0]["cron"] == "17 * * * *"
+    assert len(sched) == 1 and sched[0]["cron"] == "7,27,47 * * * *"
     raw = (WF / "tournament.yaml").read_text()
     assert raw.count("cron:") == 1
 
@@ -56,18 +60,62 @@ def test_test_bot_is_manual_only():
     assert list(on) == ["workflow_dispatch"]
 
 
+def _run_env(name):
+    job = load(name)["jobs"]["forecast_job"]
+    step = next(s for s in job["steps"] if s.get("name") == "Run bot")
+    return {**job.get("env", {}), **step["env"]}
+
+
 def test_publish_comes_from_variable_and_keys_from_secrets():
     for name in ("tournament.yaml", "test_bot.yaml"):
-        steps = load(name)["jobs"]["forecast_job"]["steps"]
-        env = next(s for s in steps if s.get("name") == "Run bot")["env"]
+        env = _run_env(name)
         assert env["PUBLISH"] == "${{ vars.PUBLISH }}"
         for k in ("METACULUS_TOKEN", "OPENROUTER_API_KEY"):
             assert env[k] == "${{ secrets.%s }}" % k
+        assert not [k for k in env if "EXA" in k or "PERPLEXITY" in k]  # B10
 
 
 def test_version_matches_pyproject():
+    import precheck
+
     py = (ROOT / "pyproject.toml").read_text()
-    assert re.search(r'^version = "([^"]+)"', py, re.M).group(1) == main.VERSION == "0.1.0"
+    version = re.search(r'^version = "([^"]+)"', py, re.M).group(1)
+    assert version == main.VERSION == precheck.VERSION == "0.1.1"
+
+
+def test_workflows_locked_down():  # B6, B10, override 3
+    for name in ("tournament.yaml", "test_bot.yaml"):
+        wf = load(name)
+        raw = (WF / name).read_text()
+        assert wf["permissions"] == {"contents": "read"}
+        assert set(wf["on"]) <= {"workflow_dispatch", "schedule"}
+        assert "pull_request" not in raw
+        assert wf["concurrency"]["cancel-in-progress"] is False
+        job = wf["jobs"]["forecast_job"]
+        assert job["timeout-minutes"] == 40
+        for step in job["steps"]:
+            if "uses" in step:
+                assert re.fullmatch(r"[\w./-]+@[0-9a-f]{40}", step["uses"]), step["uses"]
+
+
+def test_idle_run_skips_heavy_steps():  # B14
+    steps = load("tournament.yaml")["jobs"]["forecast_job"]["steps"]
+    names = [s["name"] for s in steps]
+    assert names.index("Quick check") < names.index("Set up Python")
+    assert next(s for s in steps if s["name"] == "Quick check")["run"] == "python3 precheck.py"
+    for s in steps:
+        if s["name"] in ("Set up Python", "Load cached venv", "Install poetry (cache miss only)",
+                         "Install dependencies (cache miss only)", "Run bot"):
+            assert "steps.precheck.outputs.work == 'true'" in s["if"], s["name"]
+
+
+def test_light_modules_need_no_installed_packages():  # B14
+    code = (
+        "import sys; import precheck, standings, budget, state; "
+        "bad = [m for m in ('forecasting_tools', 'requests', 'litellm', 'numpy') if m in sys.modules]; "
+        "sys.exit(1 if bad else 0)"
+    )
+    assert subprocess.run([sys.executable, "-c", code], cwd=ROOT).returncode == 0
 
 
 def test_no_keys_or_local_paths_in_tracked_files():
@@ -90,23 +138,13 @@ def test_no_keys_or_local_paths_in_tracked_files():
     assert hits == []
 
 
-def test_model_resolution_prefers_gpt54_and_falls_back():
-    models = [
-        {"id": "openai/gpt-5.4", "created": 1},
-        {"id": "openai/gpt-5.4-mini", "created": 1},
-        {"id": "openai/gpt-5.5", "created": 2},
-    ]
-    assert main.resolve_models(models) == ("openai/gpt-5.4", "openai/gpt-5.4-mini")
-    newer = [{"id": "openai/gpt-5.2", "created": 1}, {"id": "openai/gpt-5.6", "created": 3},
-             {"id": "openai/gpt-5.6-mini", "created": 3}, {"id": "openai/gpt-5.6-pro", "created": 4}]
-    assert main.resolve_models(newer) == ("openai/gpt-5.6", "openai/gpt-5.6-mini")
-    assert main.resolve_models(None) == ("openai/gpt-5.4", "openai/gpt-5.4-mini")
-
-
 def test_research_uses_native_search_only():
-    llms = main.build_llms("openai/gpt-5.4", "openai/gpt-5.4-mini", economy=False)
+    llms = main.build_llms("openai/gpt-5.6-terra", "openai/gpt-5.4-mini")
     plugins = llms["researcher"].litellm_kwargs["extra_body"]["plugins"]
-    assert plugins == [{"id": "web", "engine": "native"}]
+    assert plugins == [{"id": "web", "engine": "native"}]  # B4
+    assert llms["researcher"].model == "openrouter/openai/gpt-5.4-mini"  # C2
+    assert llms["default"].model == "openrouter/openai/gpt-5.6-terra"
+    assert not re.search(r"(\}|[\w.-]):online", (ROOT / "main.py").read_text())  # no ":online" model IDs
 
 
 def test_prompts_have_no_banned_patterns():
