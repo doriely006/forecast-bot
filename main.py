@@ -49,7 +49,7 @@ import guards  # noqa: E402
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 
 # Model choice (explicit candidate lists, per-tournament config) lives in
 # budget.py so the light precheck step can use it without dependencies.
@@ -609,11 +609,8 @@ def cli(argv: list[str] | None = None) -> int:
         prices = budget.model_prices(models, sorted({*forecast_ids.values(), cheap_id}))
         register_prices_with_litellm(prices)
         client = MetaculusClient()
-        store = (
-            state.PendingComments.load(state.state_dir(env))
-            if publish and args.mode == "tournament"
-            else None
-        )
+        # Tournament runs (dry or not) keep the failure counts; only publishing stores comments.
+        store = state.PendingComments.load(state.state_dir(env)) if args.mode == "tournament" else None
         result = asyncio.run(
             runner.run(
                 mode=args.mode,

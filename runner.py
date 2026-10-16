@@ -16,10 +16,11 @@ from typing import Any, Callable
 
 import budget
 import precheck
+import state as state_mod
 
 logger = logging.getLogger(__name__)
 
-PER_QUESTION_RETRIES = 2  # extra attempts within one run (C5: nothing carried across runs)
+PER_QUESTION_RETRIES = 2  # extra attempts within one run; across runs only state.py's failure count (stop-loss)
 PUBLISH_ATTEMPTS = 3
 COMMENT_ATTEMPTS = 3
 MAX_QUESTIONS_TO_FETCH = 2000
@@ -135,6 +136,7 @@ class Outcome:
     status: str  # submitted | comment_failed | dry_run | failed | skipped_budget | stopped
     detail: str = ""
     cost: float = 0.0
+    fatal: bool = False  # run-wide OpenRouter 401/402: not this question's fault, never counted
 
 
 @dataclass
@@ -154,6 +156,8 @@ class RunResult:
     outcomes: list[Outcome] = field(default_factory=list)
     windows: list[tuple[str, str, str, str, str]] = field(default_factory=list)
     llm_needed: bool = False
+    skipped_failing: list[dict[str, Any]] = field(default_factory=list)  # failed MAX runs in a row
+    fail_limit: int = 0
     fatal: str = ""  # OpenRouter 401/402 mid-run: everything stopped (B3)
     usage_before: float | None = None
     usage_after: float | None = None
@@ -258,6 +262,8 @@ async def run(
                 to_forecast.append((name, q))
 
     to_forecast.sort(key=_close_key)  # closing soonest first
+    if store is not None and mode == "tournament":
+        to_forecast = _drop_failing(store, to_forecast, env, result)
     if decision.remaining is not None:
         open_new = {k: 0 for k in budget.KINDS}
         for name, _ in to_forecast:
@@ -282,9 +288,11 @@ async def run(
 
         async def one(name: str, q: Any) -> Outcome:
             async with sem:
-                return await forecast_one(
+                outcome = await forecast_one(
                     bots[budget.kind_of(name)], client, name, q, publish, key_lookup_fn, env, stop, result, store
                 )
+                _count_failure(store, name, q, outcome)
+                return outcome
 
         result.outcomes = list(await asyncio.gather(*[one(n, q) for n, q in to_forecast]))
 
@@ -293,6 +301,42 @@ async def run(
         result.usage_after = after.usage
         result.remaining_after = after.remaining
     return result
+
+
+def _qkey(q: Any) -> str:
+    return state_mod.question_key(q.id_of_question, q.id_of_post)
+
+
+def _drop_failing(store: Any, to_forecast: list[tuple[str, Any]], env: dict[str, str],
+                  result: RunResult) -> list[tuple[str, Any]]:
+    """Stop-loss: questions that failed MAX_QUESTION_FAILED_RUNS runs in a row get no LLM call."""
+    if not result.fetch_errors:  # a tournament we could not read must not wipe its counts
+        store.prune_failures({_qkey(q) for _, q in to_forecast})
+    result.fail_limit = state_mod.max_failed_runs(env)
+    dead = store.skipped(result.fail_limit)
+    kept = []
+    for name, q in to_forecast:
+        item = dead.get(_qkey(q))
+        if item is None:
+            kept.append((name, q))
+        else:
+            result.skipped_failing.append(
+                {"id": _qkey(q), "title": q.question_text, "url": q.page_url,
+                 "count": int(item["count"]), "last_error": item.get("last_error", "")}
+            )
+    return kept
+
+
+def _count_failure(store: Any, tournament: str, q: Any, outcome: Outcome) -> None:
+    """No forecast sent (or produced, in a dry run) = +1; a forecast = reset. 401/402 never count."""
+    if store is None:
+        return
+    key = _qkey(q)
+    if outcome.status == "failed" and not outcome.fatal:
+        last = outcome.detail.split(" | ")[-1]
+        store.record_failure(key, q.question_text, q.page_url, last)
+    elif outcome.status in ("submitted", "comment_failed", "dry_run"):
+        store.clear_failure(key)
 
 
 class _ForecastOnlyClient:
@@ -345,7 +389,7 @@ async def forecast_one(
             if status:  # B3: no retry, the whole run stops
                 result.fatal = result.fatal or f"OpenRouter HTTP {status}: run stopped, nothing else attempted"
                 stop.set()
-                return Outcome(tournament, title, url, "failed", " | ".join(errors))
+                return Outcome(tournament, title, url, "failed", " | ".join(errors), fatal=True)
     if report is None:
         return Outcome(tournament, title, url, "failed", " | ".join(errors))
     status = llm_fatal_status(" ".join(report.errors or []))
@@ -405,6 +449,18 @@ def _asknews() -> str:
     return "on" if os.getenv("ASKNEWS_CLIENT_ID") and os.getenv("ASKNEWS_SECRET") else "off"
 
 
+def render_skipped(skipped: list[dict[str, Any]], limit: int | None = None) -> list[str]:
+    """Yellow block: questions skipped after repeated failures (id, title, count, last error)."""
+    if not skipped:
+        return []
+    head = f"**{len(skipped)} 題連續失敗，已停止重試（不再呼叫 AI，省錢）**"
+    if limit:
+        head += f"；要再試改 MAX_QUESTION_FAILED_RUNS（現在 {limit}），題目截止後自動消失"
+    rows = ["> - " + f"{s['id']}｜{str(s['title'])[:60].replace(chr(10), ' ')}｜失敗 {s['count']} 次｜"
+            f"{' '.join(str(s.get('last_error', '')).split())[:200]}" for s in skipped]
+    return ["", "> [!WARNING]", f"> {head}", *rows, ""]
+
+
 def render_summary(r: RunResult, with_header: bool = True) -> str:
     lines: list[str] = [precheck.summary_header(r.publish), ""] if with_header else []
     lines += [f"## forecast-bot v{r.version}：預測", ""]
@@ -423,6 +479,8 @@ def render_summary(r: RunResult, with_header: bool = True) -> str:
     if r.fetch_errors and r.open_counts and not r.fetch_auth_error:
         for err in r.fetch_errors:
             lines += _block("WARNING", f"**抓題失敗（另一邊照跑）**：{err}")
+    if with_header:  # with a precheck step above, it already lists these
+        lines += render_skipped(r.skipped_failing, r.fail_limit)
     comment_failed = r.count("comment_failed")
     if comment_failed:
         lines += _block("CAUTION", f"**{comment_failed} 題的說明（comment）沒送出去**，預測已送；下一輪會自動補送。")

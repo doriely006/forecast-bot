@@ -48,6 +48,7 @@ jobs:
       BINARY_MAX: ${{ vars.BINARY_MAX }}
       MC_MIN_PROB: ${{ vars.MC_MIN_PROB }}
       BOT_USERNAME: ${{ vars.BOT_USERNAME }}
+      MAX_QUESTION_FAILED_RUNS: ${{ vars.MAX_QUESTION_FAILED_RUNS }}
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

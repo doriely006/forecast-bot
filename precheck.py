@@ -29,7 +29,7 @@ from typing import Any, Callable
 import budget
 import state as state_mod
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 SWITCHES = ("BOT_ENABLED", "PUBLISH", "DRY_RUN_LLM")
 # Must equal forecasting_tools.MetaculusClient.CURRENT_AI_COMPETITION_ID /
 # CURRENT_MINIBENCH_ID (asserted in tests).
@@ -280,6 +280,16 @@ def _block(kind: str, text: str) -> list[str]:
     return ["", f"> [!{kind}]", f"> {text}", ""]
 
 
+def _skipped_block(stuck: list[dict[str, Any]], limit: int) -> list[str]:
+    if not stuck:
+        return []
+    rows = [f"> - {s['id']}｜{s['title'][:60].replace(chr(10), ' ')}｜失敗 {s['count']} 次｜"
+            f"{' '.join(str(s['last_error']).split())[:200]}" for s in stuck]
+    return ["", "> [!WARNING]",
+            f"> **{len(stuck)} 題連續失敗，已停止重試（不再呼叫 AI，省錢）**；"
+            f"要再試改 MAX_QUESTION_FAILED_RUNS（現在 {limit}），題目截止後自動消失", *rows, ""]
+
+
 def write_out(name: str, value: str, env: dict[str, str]) -> None:
     path = env.get("GITHUB_OUTPUT")
     if path:
@@ -351,7 +361,17 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
             lines += _block("CAUTION", f"**放棄補送說明**（試了 {state_mod.MAX_RESEND_ATTEMPTS} 次）：{d.get('url', d['post_id'])}")
 
     decision = budget.decide(budget.fetch_key_info(env.get("OPENROUTER_API_KEY"), deps.get_json), env)
-    new = [it for it in items if it.supported and not it.forecasted]
+    fail_limit = state_mod.max_failed_runs(env)
+    dead = store.skipped(fail_limit)
+    todo = [it for it in items if it.supported and not it.forecasted]
+    # v0.1.2: questions that failed MAX_QUESTION_FAILED_RUNS runs in a row are not "work"
+    new = [it for it in todo if state_mod.question_key(it.question_id, it.post_id) not in dead]
+    stuck = [
+        {"id": k, "title": it.title, "url": it.url, "count": int(dead[k]["count"]),
+         "last_error": dead[k].get("last_error", "")}
+        for it in todo
+        if (k := state_mod.question_key(it.question_id, it.post_id)) in dead
+    ]
     unsupported = [it for it in items if not it.supported]
     dry_llm = env.get("DRY_RUN_LLM", "") == "1" and event == "workflow_dispatch"
     needs_llm = (publish and bool(new)) or (not publish and dry_llm)
@@ -369,6 +389,7 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
         f"- OpenRouter 額度：{decision.state}（{decision.reason}）",
     ]
     lines += pacing_lines(decision, items, env)
+    lines += _skipped_block(stuck, fail_limit)
     work = needs_llm and not systemic
     if publish:
         lines.append(f"- 這輪：{'有新題，進入預測' if work else '沒有要做的事，到此結束（不安裝套件）'}")

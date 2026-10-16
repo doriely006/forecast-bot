@@ -288,3 +288,110 @@ def test_cli_writes_summary_even_when_it_crashes(monkeypatch, tmp_path):  # B1, 
     monkeypatch.setenv("PUBLISH", "yes")
     assert main.cli(["--mode", "test_questions"]) == 1
     assert "PUBLISH=\"yes\" is not allowed" in out.read_text()
+
+
+# --- v0.1.2: cross-run failure stop-loss (SPEC 12.4) ---
+
+import pytest
+
+
+def _only_failing(text="Fixture question that ALWAYSFAILS"):
+    q = load_fixture_questions()["MiniBench"][2]  # post 203 / question 2203
+    q.question_text = text
+    return FakeClient({"FutureEval Fall 2026": [], "MiniBench": [q]}), q
+
+
+def _round(client, tmp_path, publish=True, env=None):
+    store = state.PendingComments.load(tmp_path)  # a fresh load each run = a cache restore
+    return do_run(client, publish=publish, store=store, env=env, concurrency=1)
+
+
+def test_three_failed_runs_then_fourth_makes_no_llm_call(fake_llm, tmp_path):
+    client, _ = _only_failing()
+    for n in (1, 2, 3):
+        before = len(fake_llm.calls)
+        r = _round(client, tmp_path)
+        assert len(fake_llm.calls) > before and r.failed == 1 and not r.skipped_failing
+        assert state.PendingComments.load(tmp_path).failed_runs("2203") == n
+    assert (tmp_path / "changed").exists()
+    before = len(fake_llm.calls)
+    r = _round(client, tmp_path)
+    assert len(fake_llm.calls) == before and r.outcomes == [] and not r.llm_needed
+    assert [s["id"] for s in r.skipped_failing] == ["2203"] and r.skipped_failing[0]["count"] == 3
+    text = runner.render_summary(r)
+    assert "[!WARNING]" in text and "2203｜Fixture question that ALWAYSFAILS｜失敗 3 次｜attempt 3: RuntimeError: fake LLM outage" in text
+    assert r.exit_code == 0
+    assert "連續失敗" not in runner.render_summary(r, with_header=False)  # precheck lists it instead
+
+
+def test_success_in_between_resets_the_count(fake_llm, tmp_path):
+    client, q = _only_failing()
+    _round(client, tmp_path)
+    _round(client, tmp_path)
+    assert state.PendingComments.load(tmp_path).failed_runs("2203") == 2
+    q2 = client.questions["MiniBench"][0]
+    q2.question_text = "A question that works"
+    r = _round(client, tmp_path)
+    assert r.count("submitted") == 1 and state.PendingComments.load(tmp_path).failures == {}
+    q2.question_text = "Fixture question that ALWAYSFAILS"
+    for _ in range(2):  # needs three fresh failures again, so these two still call the LLM
+        before = len(fake_llm.calls)
+        _round(client, tmp_path)
+        assert len(fake_llm.calls) > before
+
+
+def test_402_never_counts(fake_llm, tmp_path):
+    client, _ = _only_failing("Fixture question PAYMENT402")
+    for _ in range(5):
+        before = len(fake_llm.calls)
+        r = _round(client, tmp_path)
+        assert len(fake_llm.calls) > before and "402" in r.fatal  # never skipped for it
+    assert state.PendingComments.load(tmp_path).failures == {}
+
+
+def test_questions_stopped_by_a_402_are_not_counted(fake_llm, tmp_path):
+    qs = load_fixture_questions()
+    qs["FutureEval Fall 2026"][2].question_text += " PAYMENT402"
+    store = state.PendingComments.load(tmp_path)
+    r = do_run(FakeClient(qs), publish=True, concurrency=1, store=store)
+    assert r.count("stopped") == 6
+    assert store.failures == {}  # the 402 victim and the stopped ones: nothing counted
+
+
+@pytest.mark.parametrize("setup", ["missing", "garbage"])
+def test_first_run_without_cache_is_normal(fake_llm, tmp_path, setup):
+    d = tmp_path / "state"
+    if setup == "garbage":
+        d.mkdir()
+        (d / "state.json").write_text("{not json")
+    store = state.PendingComments.load(d)
+    assert store.failures == {} and store.items == {}
+    client, _ = _only_failing("A question that works")
+    r = do_run(client, publish=True, store=store)
+    assert r.count("submitted") == 1 and r.skipped_failing == []
+
+
+def test_dry_run_llm_failures_count_and_limit_is_configurable(fake_llm, tmp_path):
+    client, _ = _only_failing()
+    env = {"DRY_RUN_LLM": "1", "MAX_QUESTION_FAILED_RUNS": "1"}
+    r = _round(client, tmp_path, publish=False, env=env)
+    assert r.failed == 1 and state.PendingComments.load(tmp_path).failed_runs("2203") == 1
+    before = len(fake_llm.calls)
+    r = _round(client, tmp_path, publish=False, env=env)
+    assert len(fake_llm.calls) == before and len(r.skipped_failing) == 1
+    assert state.max_failed_runs({}) == 3
+    assert [state.max_failed_runs({"MAX_QUESTION_FAILED_RUNS": v}) for v in ("5", " 2 ", "0", "x", "")] == [5, 2, 3, 3, 3]
+
+
+def test_skipped_question_does_not_use_the_cap_and_closed_ones_are_forgotten(fake_llm, tmp_path):
+    client, _ = _only_failing()
+    store = state.PendingComments.load(tmp_path)
+    for _ in range(3):
+        store.record_failure("2203", "t", "u", "boom")
+    store.record_failure("9999", "closed long ago", "u", "boom")
+    r = do_run(client, publish=True, store=store)
+    assert "9999" not in store.failures and "2203" in store.failures
+    assert len(r.skipped_failing) == 1 and r.outcomes == []
+    client.fail_tournaments = {"MiniBench"}  # unreadable tournament: counts must survive
+    do_run(client, publish=True, store=store)
+    assert "2203" in store.failures

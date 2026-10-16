@@ -174,3 +174,30 @@ def test_tournament_ids_match_sdk():
         ("FutureEval Fall 2026", MetaculusClient.CURRENT_AI_COMPETITION_ID),
         ("MiniBench", MetaculusClient.CURRENT_MINIBENCH_ID),
     ]
+
+
+def _fail_n(tmp_path, key, n):
+    store = state.PendingComments.load(tmp_path)
+    for _ in range(n):
+        store.record_failure(key, "Question 5", "u", "RuntimeError: boom\nsecond line")
+
+
+def test_skipped_question_is_not_work_and_is_listed_yellow(tmp_path):  # v0.1.2
+    api = Api(main=MAIN + [post(5, q(51))])
+    _fail_n(tmp_path, "51", 2)
+    assert run(env(PUBLISH="1"), api=api, tmp=tmp_path)[1] is True  # 2 < 3: still work
+    _fail_n(tmp_path, "51", 1)
+    code, work, text = run(env(PUBLISH="1"), api=api, tmp=tmp_path)
+    assert code == 0 and work is False and "到此結束" in text and "還沒預測 0" in text
+    assert "[!WARNING]" in text and "51｜Question 5｜失敗 3 次｜RuntimeError: boom second line" in text
+    # the limit is configurable
+    assert run(env(PUBLISH="1", MAX_QUESTION_FAILED_RUNS="4"), api=api, tmp=tmp_path)[1] is True
+    # a skipped question next to a new one: the new one is still work
+    api2 = Api(main=MAIN + [post(5, q(51)), post(6, q(61))])
+    assert run(env(PUBLISH="1"), api=api2, tmp=tmp_path)[1] is True
+
+
+def test_dry_llm_run_also_ignores_skipped_in_count_but_first_run_has_no_cache(tmp_path):
+    api = Api(main=MAIN + [post(5, q(51))])
+    code, work, text = run(env(PUBLISH="1"), api=api, tmp=tmp_path / "never-restored")
+    assert code == 0 and work is True and "連續失敗" not in text
