@@ -12,7 +12,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 import budget
 import precheck
@@ -24,6 +24,9 @@ PER_QUESTION_RETRIES = 2  # extra attempts within one run; across runs only stat
 PUBLISH_ATTEMPTS = 3
 COMMENT_ATTEMPTS = 3
 MAX_QUESTIONS_TO_FETCH = 2000
+PROBE_TIMEOUT_S = 30  # v0.1.4 health probe: one tiny cheap-model call, at most PROBE_ATTEMPTS HTTP calls per run
+PROBE_ATTEMPTS = 2
+PROBE_TOKENS_IN, PROBE_TOKENS_OUT = 30, 16  # rough size of one probe call, for the cost estimate
 
 
 def env_flag(name: str, env: dict[str, str] | None = None) -> bool:
@@ -159,7 +162,11 @@ class RunResult:
     skipped_failing: list[dict[str, Any]] = field(default_factory=list)  # failed MAX runs in a row
     fail_limit: int = 0
     cooldown_hours: int = 0
-    upstream_suspect: bool = False  # v0.1.3: >=2 attempted, all failed non-fatally -> counts rolled back
+    upstream_suspect: bool = False  # >=2 attempted, all failed, and the probe failed too -> counts rolled back
+    probe: str = ""  # v0.1.4: "" = not run | "ok" (upstream fine, failures are the questions') | "failed" | "fatal"
+    probe_error: str = ""
+    probe_calls: int = 0
+    probe_cost: float = 0.0
     fatal: str = ""  # OpenRouter 401/402 mid-run: everything stopped (B3)
     usage_before: float | None = None
     usage_after: float | None = None
@@ -180,7 +187,7 @@ class RunResult:
     def spend(self) -> float:
         if self.usage_before is not None and self.usage_after is not None:
             return max(0.0, self.usage_after - self.usage_before)
-        return sum(o.cost for o in self.outcomes)
+        return sum(o.cost for o in self.outcomes) + self.probe_cost
 
     @property
     def systemic(self) -> list[str]:
@@ -230,6 +237,7 @@ async def run(
     store: Any = None,
     today: date | None = None,
     now: datetime | None = None,
+    probe_fn: Callable[[], Awaitable[Any]] | None = None,
 ) -> RunResult:
     env = dict(os.environ) if env is None else env
     lookup = key_lookup_fn()
@@ -300,9 +308,8 @@ async def run(
                 return outcome
 
         result.outcomes = list(await asyncio.gather(*[one(n, q) for n, q in to_forecast]))
-        if store is not None and _upstream_suspect(result.outcomes):
-            result.upstream_suspect = True
-            store.rollback_all()
+        if probe_fn is not None and _upstream_suspect(result.outcomes):
+            await _health_probe(probe_fn, result, prices[budget.KINDS[0]][1], store, stop)
 
     after = key_lookup_fn().info if (decision.may_call_llm and to_forecast) else lookup.info
     if after is not None:
@@ -315,8 +322,37 @@ def _qkey(q: Any) -> str:
     return state_mod.question_key(q.id_of_question, q.id_of_post)
 
 
+async def _health_probe(probe_fn: Callable[[], Awaitable[Any]], result: RunResult,
+                        cheap_price: tuple[float, float], store: Any, stop: asyncio.Event) -> None:
+    """v0.1.4: >=2 questions all failed, so ask the cheapest model for one tiny answer (30 s, one retry).
+    ok -> the questions are at fault, counts stay | 401/402 -> fatal, nothing counts | other failure -> outage, nothing counts."""
+    errors: list[str] = []
+    for _ in range(PROBE_ATTEMPTS):
+        result.probe_calls += 1
+        result.probe_cost += cheap_price[0] * PROBE_TOKENS_IN + cheap_price[1] * PROBE_TOKENS_OUT
+        try:
+            await asyncio.wait_for(probe_fn(), PROBE_TIMEOUT_S)
+            result.probe = "ok"
+            return
+        except Exception as e:  # includes asyncio.TimeoutError
+            errors.append(root_message(e) if str(e) else e.__class__.__name__)
+            logger.warning(f"Health probe failed: {errors[-1]}")
+            status = llm_fatal_status(e)
+            if status:
+                result.probe, result.probe_error = "fatal", errors[-1]
+                result.fatal = result.fatal or f"OpenRouter HTTP {status}: run stopped, nothing else attempted"
+                stop.set()
+                if store is not None:
+                    store.rollback_all()
+                return
+    result.probe, result.probe_error = "failed", " | ".join(errors)[:300]
+    result.upstream_suspect = True
+    if store is not None:
+        store.rollback_all()
+
+
 def _upstream_suspect(outcomes: list[Outcome]) -> bool:
-    """>=2 questions really attempted and every one failed without a 401/402: look like an upstream outage."""
+    """>=2 questions really attempted and every one failed without a 401/402: only a reason to run the health probe."""
     attempted = [o for o in outcomes if o.status not in ("skipped_budget", "stopped")]
     return len(attempted) >= 2 and all(o.status == "failed" and not o.fatal for o in attempted)
 
@@ -496,8 +532,11 @@ def render_summary(r: RunResult, with_header: bool = True) -> str:
     for reason in r.systemic:
         lines += _block("CAUTION", f"**停止／系統性問題**：{reason}")
     if r.upstream_suspect:
-        lines += _block("CAUTION", "**疑似上游故障，本輪不計失敗**：這輪試了 "
-                        f"{r.failed} 題全部失敗（不是 401／402），失敗次數沒有累計，下一輪照常重試。")
+        lines += _block("CAUTION", "**疑似上游故障（探測失敗），本輪不計失敗**：這輪試了 "
+                        f"{r.failed} 題全部失敗，健康探測也失敗（{r.probe_error}），失敗次數沒有累計，下一輪照常重試。")
+    elif r.probe == "ok":
+        lines += _block("WARNING", f"**上游正常，失敗算題目的**：這輪試了 {r.failed} 題全部失敗，"
+                        "但探測呼叫成功，所以這輪的失敗照常計數（連續失敗會被跳過）。")
     if r.decision.warning:
         lines += _block("WARNING", r.decision.warning)
     if r.fetch_errors and r.open_counts and not r.fetch_auth_error:
@@ -525,7 +564,7 @@ def render_summary(r: RunResult, with_header: bool = True) -> str:
     if r.not_attempted_cap:
         lines.append(f"- 這輪上限外沒做：{r.not_attempted_cap}")
     lines += [
-        f"- 這輪估計花費：{_money(r.spend)}",
+        f"- 這輪估計花費：{_money(r.spend)}" + (f"（含探測 {r.probe_calls} 次）" if r.probe_calls else ""),
         f"- OpenRouter 剩餘：{_money(r.remaining_after)}",
     ]
     bad = [o for o in r.outcomes if o.status in ("failed", "comment_failed")]

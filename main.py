@@ -49,7 +49,7 @@ import guards  # noqa: E402
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 
 # Model choice (explicit candidate lists, per-tournament config) lives in
 # budget.py so the light precheck step can use it without dependencies.
@@ -83,6 +83,25 @@ def _web_search_llm(model_id: str) -> GeneralLlm:
         allowed_tries=2,
         extra_body={"plugins": [{"id": "web", "engine": "native"}]},
     )
+
+
+def make_probe(cheap_id: str) -> Any:
+    """v0.1.4 health probe: one HTTP call, no SDK retry, the cheapest (research) model, tiny answer.
+    Any returned answer (even empty, e.g. a reasoning model spending its 16 tokens) means the upstream is up."""
+
+    async def probe() -> None:
+        import litellm
+        import runner
+
+        await litellm.acompletion(
+            model=f"openrouter/{cheap_id}",
+            messages=[{"role": "user", "content": 'Reply with the single word "ok".'}],
+            max_tokens=16,
+            timeout=runner.PROBE_TIMEOUT_S,
+            num_retries=0,
+        )
+
+    return probe
 
 
 def build_llms(forecast_id: str, cheap_id: str) -> dict[str, Any]:
@@ -625,6 +644,7 @@ def cli(argv: list[str] | None = None) -> int:
                 prices={k: (prices[forecast_ids[k]], prices[cheap_id]) for k in budget.KINDS},
                 env=env,
                 store=store,
+                probe_fn=make_probe(cheap_id),
             )
         )
         crash = ""

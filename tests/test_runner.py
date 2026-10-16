@@ -404,6 +404,20 @@ from datetime import datetime, timedelta, timezone
 T0 = datetime(2026, 10, 16, 12, 0, tzinfo=timezone.utc)
 
 
+class Probe:
+    """Fake health probe: counts calls (= HTTP calls); `fail` is raised on every call, or per call if a list."""
+
+    def __init__(self, fail=None):
+        self.calls = 0
+        self.fail = fail
+
+    async def __call__(self):
+        self.calls += 1
+        f = self.fail[self.calls - 1] if isinstance(self.fail, list) else self.fail
+        if f is not None:
+            raise f
+
+
 def _two_failing():
     qs = load_fixture_questions()
     a, b = qs["FutureEval Fall 2026"][0], qs["MiniBench"][2]  # keys 1101, 2203
@@ -411,24 +425,24 @@ def _two_failing():
     return FakeClient({"FutureEval Fall 2026": [a], "MiniBench": [b]}), a, b
 
 
-def _at(client, tmp_path, now, env=None, publish=True):
+def _at(client, tmp_path, now, env=None, publish=True, probe=None):
     store = state.PendingComments.load(tmp_path)
     return do_run(client, publish=publish, store=store, env=env, concurrency=1) if now is None else asyncio.run(
         runner.run(mode="tournament", publish=publish, bot_factory=lambda k, t: main.make_bot(
             MODELS[k][0], MODELS[k][1], t.forecasts, client), client=client,
             key_lookup_fn=lambda: key(), version=main.VERSION, models=MODELS, prices=PRICES,
             env=env or {}, tournaments=TOURNAMENTS, store=store, today=date(2026, 10, 16),
-            concurrency=1, now=now))
+            concurrency=1, now=now, probe_fn=probe))
 
 
-def test_round_where_two_or_more_all_fail_counts_nothing(fake_llm, tmp_path):
+def test_round_where_two_or_more_all_fail_counts_nothing(fake_llm, tmp_path):  # probe fails = outage
     client, _, _ = _two_failing()
     for _ in range(5):  # never reaches the limit: an outage must not skip anything
         before = len(fake_llm.calls)
-        r = _at(client, tmp_path, T0)
+        r = _at(client, tmp_path, T0, probe=Probe(fail=RuntimeError("upstream down")))
         assert len(fake_llm.calls) > before and r.failed == 2 and r.upstream_suspect
         assert state.PendingComments.load(tmp_path).failures == {}
-    assert "疑似上游故障，本輪不計失敗" in runner.render_summary(r)
+    assert "疑似上游故障（探測失敗），本輪不計失敗" in runner.render_summary(r)
 
 
 def test_single_failure_still_counts_and_mixed_round_counts_the_failure(fake_llm, tmp_path):
@@ -449,7 +463,7 @@ def test_systemic_round_restores_the_old_entries_exactly(fake_llm, tmp_path):
     store.record_failure("1101", "t", "u", "old error", now=T0 - timedelta(hours=1))
     store.record_failure("1101", "t", "u", "old error", now=T0 - timedelta(hours=1))
     before = {k: dict(v) for k, v in store.failures.items()}
-    r = _at(client, tmp_path, T0)
+    r = _at(client, tmp_path, T0, probe=Probe(fail=RuntimeError("upstream down")))
     assert r.upstream_suspect and state.PendingComments.load(tmp_path).failures == before
 
 
@@ -526,3 +540,102 @@ def test_fatal_402_and_stopped_questions_take_their_write_ahead_back(fake_llm, t
     assert r.count("stopped") == 6 and "402" in r.fatal
     saved = state.PendingComments.load(tmp_path).failures
     assert list(saved) == ["1101"] and saved["1101"]["count"] == 1 and saved["1101"]["last_error"] == "old"
+
+
+# --- v0.1.4: health probe replaces "2 all-failed = outage" (SPEC 12.4 end) ---
+
+
+def test_two_poison_questions_with_healthy_upstream_count_and_get_skipped(fake_llm, tmp_path):  # the v0.1.3 hole
+    client, _, _ = _two_failing()
+    probe = Probe()
+    for n in (1, 2, 3):
+        r = _at(client, tmp_path, T0, probe=probe)
+        assert r.failed == 2 and r.probe == "ok" and not r.upstream_suspect and probe.calls == n
+        failures = state.PendingComments.load(tmp_path).failures
+        assert failures["1101"]["count"] == n and failures["2203"]["count"] == n
+    text = runner.render_summary(r)
+    assert "上游正常，失敗算題目的" in text and "[!WARNING]" in text and "含探測 1 次" in text
+    before = len(fake_llm.calls)
+    r = _at(client, tmp_path, T0, probe=probe)  # round 4: both skipped, no LLM call, no probe
+    assert len(fake_llm.calls) == before and probe.calls == 3 and r.probe == "" and len(r.skipped_failing) == 2
+
+
+def test_probe_failing_twice_rolls_back_and_names_the_error(fake_llm, tmp_path):
+    client, _, _ = _two_failing()
+    probe = Probe(fail=RuntimeError("Connection refused by upstream"))
+    r = _at(client, tmp_path, T0, probe=probe)
+    assert probe.calls == 2 and r.probe_calls == 2 and r.probe == "failed" and r.upstream_suspect
+    assert state.PendingComments.load(tmp_path).failures == {} and not r.fatal
+    text = runner.render_summary(r)
+    assert "疑似上游故障（探測失敗），本輪不計失敗" in text and "Connection refused by upstream" in text
+    assert "上游正常" not in text and "含探測 2 次" in text
+
+
+def test_probe_retry_that_succeeds_means_upstream_is_fine(fake_llm, tmp_path):
+    client, _, _ = _two_failing()
+    probe = Probe(fail=[TimeoutError("slow"), None])
+    r = _at(client, tmp_path, T0, probe=probe)
+    assert probe.calls == 2 and r.probe == "ok" and not r.upstream_suspect
+    assert state.PendingComments.load(tmp_path).failures["1101"]["count"] == 1
+
+
+def test_probe_timeout_counts_as_failure(fake_llm, tmp_path, monkeypatch):
+    client, _, _ = _two_failing()
+    monkeypatch.setattr(runner, "PROBE_TIMEOUT_S", 0.01)
+    probe = Probe()
+
+    async def slow():
+        probe.calls += 1
+        await asyncio.sleep(5)
+
+    r = _at(client, tmp_path, T0, probe=slow)
+    assert probe.calls == 2 and r.probe == "failed" and "TimeoutError" in r.probe_error
+    assert state.PendingComments.load(tmp_path).failures == {}
+
+
+def test_probe_402_is_fatal_no_retry_nothing_counted(fake_llm, tmp_path):
+    client, _, _ = _two_failing()
+    probe = Probe(fail=FakeOpenRouterError(402))
+    r = _at(client, tmp_path, T0, probe=probe)
+    assert probe.calls == 1 and r.probe == "fatal" and "402" in r.fatal and not r.upstream_suspect
+    assert state.PendingComments.load(tmp_path).failures == {}
+    assert r.exit_code == 1 and "停止／系統性問題" in runner.render_summary(r)
+
+
+def test_probe_401_is_fatal_too(fake_llm, tmp_path):
+    client, _, _ = _two_failing()
+    r = _at(client, tmp_path, T0, probe=Probe(fail=FakeOpenRouterError(401)))
+    assert r.probe == "fatal" and "401" in r.fatal and state.PendingComments.load(tmp_path).failures == {}
+
+
+def test_no_probe_for_single_failure_mixed_round_or_clean_round(fake_llm, tmp_path):
+    probe = Probe()
+    client, _ = _only_failing()
+    r = _at(client, tmp_path / "solo", T0, probe=probe)  # one failed question: counts, no probe
+    assert r.failed == 1 and r.probe == "" and probe.calls == 0
+    assert state.PendingComments.load(tmp_path / "solo").failed_runs("2203") == 1
+    client, a, _ = _two_failing()
+    a.question_text = "Fixture A works"
+    r = _at(client, tmp_path / "mixed", T0, probe=probe)  # one ok, one failed
+    assert r.count("submitted") == 1 and r.failed == 1 and probe.calls == 0
+    ok_client, _ = _only_failing("Fixture question that works")
+    r = _at(ok_client, tmp_path / "clean", T0, probe=probe)  # everything fine
+    assert r.failed == 0 and r.count("submitted") == 1 and probe.calls == 0
+
+
+def test_probe_also_runs_in_dry_run_llm_mode_and_without_probe_fn_counts(fake_llm, tmp_path):
+    client, _, _ = _two_failing()
+    probe = Probe()
+    r = _at(client, tmp_path, T0, env={"DRY_RUN_LLM": "1"}, publish=False, probe=probe)
+    assert r.failed == 2 and probe.calls == 1 and r.probe == "ok"
+    r = _at(client, tmp_path / "noprobe", T0)  # no probe_fn at all: nothing to ask, counts as normal
+    assert r.failed == 2 and not r.upstream_suspect
+    assert state.PendingComments.load(tmp_path / "noprobe").failed_runs("1101") == 1
+
+
+def test_probe_cost_is_in_the_spend_estimate(fake_llm, tmp_path):
+    client, _, _ = _two_failing()
+    r = _at(client, tmp_path, T0, probe=Probe(fail=RuntimeError("down")))
+    assert r.probe_cost == pytest.approx(2 * (MINI[0] * 30 + MINI[1] * 16)) and r.probe_cost > 0
+    r.usage_before = r.usage_after = None
+    assert r.spend == pytest.approx(r.probe_cost)  # no key info: failed questions cost 0, the probe still counts

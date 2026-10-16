@@ -2,13 +2,22 @@
 
 ## 收工日誌
 
+### 2026-10-16 v0.1.4 毒題漏洞修補（SPEC 12.4 末行）
+- runner：`_upstream_suspect`（試 ≥2 且全 failed 非 fatal）現在只是「要不要探測」的條件。`_health_probe`：`probe_fn` 最多 `PROBE_ATTEMPTS`=2 次、各 `PROBE_TIMEOUT_S`=30 秒（asyncio.wait_for）。成功 -> `result.probe="ok"`、計數照舊、summary 黃框；非 401／402 失敗 -> `probe="failed"`＋`upstream_suspect`＋`store.rollback_all()`、紅框附 `probe_error`；401／402 -> `probe="fatal"`、設 `result.fatal`、rollback_all、不重試。`probe_fn=None` 不探測、照計數（測試預設）。
+- 花費：`probe_calls`／`probe_cost`（cheap 價 x 30 in／16 out token 粗估）；`spend` 有 key usage 時用 usage 差（已含探測），沒有時 outcomes＋probe_cost；summary 花費行尾註「含探測 N 次」。
+- main：`make_probe(cheap_id)` 直接 `litellm.acompletion`（openrouter/<cheap>、max_tokens=16、num_retries=0，任何回應都算通，不看內容是否為空，避免 reasoning model 把 16 token 吃光被誤判）；cli 傳 `probe_fn`。這支沒有被真 API 驗過。
+- 舊測試改動：`test_round_where_two_or_more_all_fail_counts_nothing`／`test_systemic_round_restores_the_old_entries_exactly` 行為被取代，改成注入「探測失敗」的 fake probe 後斷言原樣；其餘舊測試未動。新增 9 個（毒題 3 輪後跳過、探測失敗撤回、重試成功、timeout、402／401、不該探測的三種輪、dry run LLM 路徑與無 probe_fn、花費）。
+- 測試：`.venv/bin/python -m pytest` -> 119 passed。
+- 未驗：探測對真 OpenRouter 的行為（model id 前綴、max_tokens=16 對 gpt-5.4-mini 是否回 200）；第一次真跑看 log 有無 "Health probe failed"。
+- 已知殘洞：上游故障期間每 20 分鐘整批重試（以前 3 輪就停）、失敗呼叫仍可能已花研究費；探測只擋「計數」，不擋重試。
+
 ### 2026-10-16 v0.1.3 止血補洞（SPEC 12.4 末行）
 - state.py：failure entry 加 `last_attempt`（UTC ISO）。`begin_attempt` write-ahead（+1、寫檔、記進記憶體 `_wa` 存舊值）／`finish_failure`（只補 last_error）／`rollback`／`rollback_all`；`clear_failure` 順手清 `_wa`。`split_skipped(limit, cooldown_h, now)` -> (冷卻中含 `next_retry`, 到期 key)。`skip_cooldown_hours(env)` 預設 6。`record_failure` 保留（直接 +1，測試造資料用）。
 - runner：`one()` 在 forecast_one 前 begin_attempt（`stop` 已設就不記）；`_count_failure` 依 outcome：failed 非 fatal 保留、成功清零、其餘（fatal／stopped／skipped_budget）rollback。gather 後 `_upstream_suspect`（試 ≥2 且全 failed 非 fatal）-> `rollback_all`＋`result.upstream_suspect`，summary 紅框。`_drop_failing` 只丟冷卻中的，到期的留下試。`run()` 加 `now` 參數（測試用）。
 - precheck：`Deps.now`；冷卻到期＝有工作、冷卻中＝沒工作；黃框列「下次重試 UTC」。workflow env 加 `SKIP_COOLDOWN_HOURS`（job 層，precheck 與 main 都吃得到）。
 - 舊 state（無 last_attempt）的已跳過題：視為到期，立刻多試一次。
 - 測試：`.venv/bin/python -m pytest` -> 110 passed。
-- 已知殘洞：①連兩題以上「同時毒題」（每輪只試到這兩題、都失敗）永遠被當上游故障不計數、每輪燒錢；②上游故障期間每 20 分鐘整批重試（以前 3 輪就停），失敗呼叫仍可能已花研究費。
+- 已知殘洞：①連兩題以上「同時毒題」被當上游故障不計數（v0.1.4 已補）；②上游故障期間每 20 分鐘整批重試（以前 3 輪就停），失敗呼叫仍可能已花研究費。
 
 ### 2026-10-16 v0.1.2 跨輪失敗止血（C5 部分回復，SPEC 12.4 末行）
 - state.py：`.state/state.json` 加 `question_failures`（key=question id，無 id 用 `p<post_id>`；count／title／url／last_error）。同一個 actions/cache、同一個 `.state/changed` 觸發存檔。
@@ -43,7 +52,7 @@
 ## v0.2 清單
 - Date／Conditional 題型：碰到就記錄跳過（現況：Conditional 已跳過並列在 Summary；Date 仍會預測）。
 - 配速是否偏重 MiniBench（MiniBench 表現好會自動加碼額度）；現在是 11-01 後正賽 80%。
-- 失敗止血（v0.1.3）上線後盯：「兩題同時毒題」被當上游故障永不計數（見 v0.1.3 殘洞）；上游故障期間整批重試的實際花費。
+- 失敗止血上線後盯：上游故障期間整批重試的實際花費；探測第一次真跑是否回 200。
 - agentic 迭代搜尋（多輪查、查到缺口再查）。
 - 已結案相似題＋預測市場（Polymarket／Kalshi／Metaculus 已結案題）查詢，當 base rate 來源。
 - 跨家族 ensemble（GPT＋Claude），先小樣本比對再上。
