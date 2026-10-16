@@ -51,6 +51,9 @@
 - user 放好 secrets、確認 auto top-up 關閉、填表單後：手動跑 Test Bot（PUBLISH 未設）-> 看 Summary 有無紅框、花費、log 裡 web search 有沒有引用來源。過了就設 BOT_ENABLED=1＋PUBLISH=1。
 - 第一次真跑後對：precheck 列題數＝main 抓到的題數；Summary 每題實際花費 vs 估算（tier 成本在 budget.py 的 token 假設，要校正）；standings 那段是否讀得到。
 - 45 天內要有 commit（公開 repo 排程 60 天停用）。
+- 第一次真跑看 log 有無 "Health probe failed"（探測沒打過真 API；誤判失敗會把毒題計數撤回）。
+- README Technical 段除了止血那段，其餘仍有 v0.1.1 以前的描述，沒逐條對過 code；下次動 README 時順手對。
+- 開 BOT_ENABLED／PUBLISH 前，user 的 Test Bot Summary 截圖要先給主 session 看過（README 第 6–8 步已寫）。
 
 ## v0.2 清單
 - Date／Conditional 題型：碰到就記錄跳過（現況：Conditional 已跳過並列在 Summary；Date 仍會預測）。
