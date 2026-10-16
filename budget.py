@@ -29,10 +29,14 @@ OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 
 # Explicit fallback lists (B11, C2). First usable one wins.
-FORECAST_CANDIDATES = ["openai/gpt-5.6-terra", "openai/gpt-5.4"]
+FORECAST_CANDIDATES = ["openai/gpt-6.1-sol", "openai/gpt-5.6-terra", "openai/gpt-5.4"]
 CHEAP_CANDIDATES = ["openai/gpt-5.4-mini", "openai/gpt-5-mini"]
-_EXCLUDED = re.compile(r"(-pro\b|-image\b|:batch$)")
-FALLBACK_PRICES = {  # USD per token (OpenRouter 2026-10-16); only if /models is unreadable
+_EXCLUDED = re.compile(r"(-pro\b|-image\b|:batch$|codex)")
+FALLBACK_PRICES = {  # USD per token (OpenRouter 2026-10-17); only if /models is unreadable
+    "openai/gpt-6.1-sol": (2e-6, 10e-6),
+    "openai/gpt-6-sol": (2e-6, 10e-6),
+    "openai/gpt-6-astra": (10e-6, 50e-6),
+    "openai/gpt-6-luna": (0.10e-6, 0.50e-6),
     "openai/gpt-5.6-terra": (2e-6, 12e-6),
     "openai/gpt-5.4": (2.5e-6, 15e-6),
     "openai/gpt-5.4-mini": (0.75e-6, 4.5e-6),

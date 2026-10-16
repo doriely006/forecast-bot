@@ -67,7 +67,7 @@ def test_model_lists_prefer_terra_then_gpt54_and_exclude_pro_image_batch():  # C
     listed = [{"id": "openai/gpt-5.4"}, {"id": "openai/gpt-5.6-terra"}, {"id": "openai/gpt-5.4-mini"}]
     assert budget.pick_model(listed, budget.FORECAST_CANDIDATES) == "openai/gpt-5.6-terra"
     assert budget.pick_model([{"id": "openai/gpt-5.4"}], budget.FORECAST_CANDIDATES) == "openai/gpt-5.4"
-    assert budget.pick_model(None, budget.FORECAST_CANDIDATES) == "openai/gpt-5.6-terra"
+    assert budget.pick_model(None, budget.FORECAST_CANDIDATES) == "openai/gpt-6.1-sol"
     # per-tournament config wins when listed; excluded variants are never used
     assert budget.pick_model(listed, budget.FORECAST_CANDIDATES, "openai/gpt-5.4") == "openai/gpt-5.4"
     for bad in ("openai/gpt-5.4-pro", "openai/gpt-5.4-image", "openai/gpt-5.4:batch"):
@@ -102,3 +102,35 @@ def test_split_after_first_minibench_round():  # C6
                         {}, PRICES)
     assert later.after_split
     assert abs(later.kinds["main"].per_question_budget - later.kinds["minibench"].per_question_budget) < 1e-9
+
+
+def test_default_final_model_is_gpt_61_sol_then_terra_then_54():  # v0.1.5
+    assert budget.FORECAST_CANDIDATES == ["openai/gpt-6.1-sol", "openai/gpt-5.6-terra", "openai/gpt-5.4"]
+    listed = [{"id": m} for m in ("openai/gpt-5.4", "openai/gpt-5.6-terra", "openai/gpt-6.1-sol")]
+    assert budget.pick_model(listed, budget.FORECAST_CANDIDATES) == "openai/gpt-6.1-sol"
+    assert budget.pick_model(None, budget.FORECAST_CANDIDATES) == "openai/gpt-6.1-sol"
+    assert budget.CHEAP_CANDIDATES[0] == "openai/gpt-5.4-mini"
+
+
+def test_sol_missing_from_models_falls_back_to_terra_then_54():
+    no_sol = [{"id": "openai/gpt-5.6-terra"}, {"id": "openai/gpt-5.4"}, {"id": "openai/gpt-5.4-mini"}]
+    assert budget.pick_model(no_sol, budget.FORECAST_CANDIDATES) == "openai/gpt-5.6-terra"
+    assert budget.pick_model(no_sol[1:], budget.FORECAST_CANDIDATES) == "openai/gpt-5.4"
+
+
+def test_pro_codex_image_batch_variants_excluded_including_sol_pro():
+    bad = ("openai/gpt-6.1-sol-pro", "openai/gpt-6-sol-pro", "openai/gpt-5.6-terra-pro",
+           "openai/gpt-6.1-sol-image", "openai/gpt-6.1-sol:batch", "openai/gpt-5.3-codex")
+    listed = [{"id": "openai/gpt-6.1-sol"}]
+    for b in bad:
+        assert not budget.allowed_model(b)
+        assert budget.pick_model([{"id": b}] + listed, budget.FORECAST_CANDIDATES, b) == "openai/gpt-6.1-sol"
+    assert budget.allowed_model("openai/gpt-6.1-sol")
+
+
+def test_sol_fallback_price_and_tier_costs():
+    f = budget.FALLBACK_PRICES["openai/gpt-6.1-sol"]
+    c = budget.FALLBACK_PRICES["openai/gpt-5.4-mini"]
+    assert f == (2e-6, 10e-6)
+    got = [round(budget.tier_cost(t, f, c), 3) for t in budget.TIERS]
+    assert got == [0.303, 0.196, 0.143, 0.089]  # README cost model

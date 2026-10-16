@@ -54,6 +54,7 @@ v0.1 定位＝「不犯錯的範本」：題題都交、不給極端值、數值
 ### 12.2 amend-2（Fable 第三輪審查）
 - C1 排程每 30 分（已被 12.3 覆寫成每 20 分）；C2 最終預測 model 預設 `openai/gpt-5.6-terra`、退回 `openai/gpt-5.4`，研究與解析 `openai/gpt-5.4-mini`，兩賽事可各自指定；C3 key 沒上限不拒跑、改用 usage 配速並標黃；C4 取消 48 小時只列題，Test Bot 3 題過了就可開 PUBLISH；C5 取消 B2 跨輪持久化；C6 額度分配日與比例做成 config；C7 standings 小工具與停損（正賽累計 40 題結算後、非 metac bot 名次後 50% 就停或換 model）；C8 README「只有你能做的事」；C9 文件數字對齊配速版；C10 見下。
 - C10：正賽與 MiniBench 是兩個獨立排行榜，MiniBench 用便宜設定只影響加碼機會，不影響正賽分數。
+- 10-17：最終 model 改 gpt-6.1-sol（GPT-6 家族 9 月上架，10-16 規格漏查）；退回 gpt-5.6-terra、再退 gpt-5.4。
 
 ### 12.3 主 session 覆寫（2026-10-16，repo 已改為 PUBLIC）
 1. 開頭「repo 維持私人」作廢。排程每 20 分鐘 cron `"7,27,47 * * * *"`（取代 C1）；README 月分鐘估算改為「公開 repo 標準 runner 免費」。

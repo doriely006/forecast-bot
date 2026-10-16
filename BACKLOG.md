@@ -2,6 +2,13 @@
 
 ## 收工日誌
 
+### 2026-10-17 v0.1.5 最終 model 換 gpt-6.1-sol
+- budget.py：FORECAST_CANDIDATES＝gpt-6.1-sol -> gpt-5.6-terra -> gpt-5.4；`_EXCLUDED` 加 `codex`；FALLBACK_PRICES 加 6.1-sol／6-sol 2/10、6-astra 10/50、6-luna 0.10/0.50（10-17 實價，主 session 查）。main.py 沒動（預設走 FORECAST_CANDIDATES，正賽與 MiniBench 同步）。
+- 新預設 tier 每題：full(5) $0.303／standard(3) $0.196／lean(2) $0.143／minimum(1) $0.089。README 成本段與月花費同步，舊數字刪除。SPEC 12.2 後補 10-17 一行。
+- 新測試 3 個（預設 sol、sol 不在清單退 terra 再退 5.4、-pro／codex 等變體排除含 sol-pro）。
+- README 改成中立英文技術版；業主操作手冊移到 repo 外（主 session 的 artifact）。
+- 未驗：gpt-6.1-sol 在 OpenRouter 的實際可用性與 reasoning token 用量（FORECAST_TOKENS 4k out 假設可能偏低）；第一次真跑看 Summary 實際花費。
+
 ### 2026-10-16 README
 - README 修正（對應驗收 FAIL 1–4）：user 步驟全文置頂（八步＋例行事項）、版號 0.1.4、停損段改寫成跨輪計數＋探測、補 repo variables 清單。
 
@@ -59,7 +66,9 @@
 - **MiniBench Claude 對照組（user 10-17 拍板）**：第一輪 MiniBench 結算後（約 11-01，C6 切便宜設定那天），MiniBench 的最終預測 model 換成 Claude（OpenRouter 上的 Anthropic 款），正賽維持 GPT。跑滿一輪 MiniBench 後，比兩邊非 metac 名次（standings.py），Claude 贏就提案正賽換。user 想押 Claude；參賽表單 models 欄已寫兩家＋這個計畫。
   - 公平性：C6 原訂 11-01 後 MiniBench 走最便宜設定——對照組期間作廢，Claude 輪要跑跟正賽 GPT 同檔位（full），否則比較不算數。
   - 輪次（10-17 主 session 提、user 問 Fable）：第 2 輪 Opus 5.5 full tier（約 $0.54／題）；第 3 輪 Fable 5.1 **minimum tier**（1 次預測，約 $0.28／題＝跟 terra full 同價），順便測「一次強預測 vs 五次中等預測平均」。Fable full tier 約 $1.25／題，不跑。單輪約 60 題、雜訊大，結果只當提示。
+  - gpt-6-astra（$10/$50）比照 Fable：只跑 minimum tier（1 次預測）。
   - 價格出處：OpenRouter /api/v1/models 10-17 實查；單題成本＝budget.py 的 token 假設推算。申請額度表單填 300。
+- 待驗：gpt-6-luna（$0.10/$0.50）是否支援 OpenRouter native web plugin；可行就把研究 model 換成 luna 省錢（不要在沒驗前換）。
 - Date／Conditional 題型：碰到就記錄跳過（現況：Conditional 已跳過並列在 Summary；Date 仍會預測）。
 - 配速是否偏重 MiniBench（MiniBench 表現好會自動加碼額度）；現在是 11-01 後正賽 80%。
 - 失敗止血上線後盯：上游故障期間整批重試的實際花費；探測第一次真跑是否回 200。

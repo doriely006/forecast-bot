@@ -29,7 +29,7 @@ from typing import Any, Callable
 import budget
 import state as state_mod
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 SWITCHES = ("BOT_ENABLED", "PUBLISH", "DRY_RUN_LLM")
 # Must equal forecasting_tools.MetaculusClient.CURRENT_AI_COMPETITION_ID /
 # CURRENT_MINIBENCH_ID (asserted in tests).
