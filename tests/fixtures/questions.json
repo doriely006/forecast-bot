@@ -1,0 +1,40 @@
+{
+  "FutureEval Fall 2026": [
+    {"type": "binary", "id_of_post": 101, "id_of_question": 1101,
+     "question_text": "Will the fixture event happen before 2027? (model says 99%)",
+     "resolution_criteria": "Resolves Yes if the fixture event happens.",
+     "close_time": "2026-11-01T00:00:00Z", "open_time": "2026-10-15T00:00:00Z",
+     "scheduled_resolution_time": "2027-01-01T00:00:00Z"},
+    {"type": "binary", "id_of_post": 102, "id_of_question": 1102,
+     "question_text": "Already forecasted fixture question",
+     "already_forecasted": true,
+     "close_time": "2026-11-02T00:00:00Z", "open_time": "2026-10-15T00:00:00Z"},
+    {"type": "multiple_choice", "id_of_post": 103, "id_of_question": 1103,
+     "question_text": "Which fixture option wins?",
+     "options": ["Alpha", "Beta", "Gamma"],
+     "close_time": "2026-10-20T00:00:00Z", "open_time": "2026-10-15T00:00:00Z"},
+    {"type": "numeric", "id_of_post": 104, "id_of_question": 1104,
+     "question_text": "How many fixture widgets (UNITBUG once)?",
+     "unit_of_measure": "widgets", "lower_bound": 0, "upper_bound": 100,
+     "open_lower_bound": false, "open_upper_bound": true,
+     "close_time": "2026-11-05T00:00:00Z", "open_time": "2026-10-15T00:00:00Z"}
+  ],
+  "MiniBench": [
+    {"type": "numeric", "id_of_post": 201, "id_of_question": 2201,
+     "question_text": "Fixture revenue in million $ (UNITBUG twice)",
+     "unit_of_measure": "million $", "lower_bound": 1000, "upper_bound": 5000,
+     "open_lower_bound": true, "open_upper_bound": true, "zero_point": 0,
+     "close_time": "2026-10-25T00:00:00Z", "open_time": "2026-10-16T00:00:00Z"},
+    {"type": "discrete", "id_of_post": 202, "id_of_question": 2202,
+     "question_text": "How many fixture goals?",
+     "unit_of_measure": "goals", "lower_bound": -0.5, "upper_bound": 10.5,
+     "open_lower_bound": false, "open_upper_bound": true, "cdf_size": 12,
+     "close_time": "2026-10-26T00:00:00Z", "open_time": "2026-10-16T00:00:00Z"},
+    {"type": "binary", "id_of_post": 203, "id_of_question": 2203,
+     "question_text": "Fixture question that ALWAYSFAILS",
+     "close_time": "2026-10-27T00:00:00Z", "open_time": "2026-10-16T00:00:00Z"},
+    {"type": "binary", "id_of_post": 204, "id_of_question": 2204,
+     "question_text": "Fixture question that FLAKY fails once",
+     "close_time": "2026-10-28T00:00:00Z", "open_time": "2026-10-16T00:00:00Z"}
+  ]
+}

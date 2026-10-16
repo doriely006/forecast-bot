@@ -1,8 +1,8 @@
 [tool.poetry]
-name = "metac-bot-template"
+name = "forecast-bot"
 version = "0.1.0"
-description = ""
-authors = ["Vasile Popescu <elisescu@elisescu.com>"]
+description = "Metaculus FutureEval Fall 2026 + MiniBench bot (based on Metaculus/metac-bot-template)"
+authors = ["doriely006"]
 readme = "README.md"
 package-mode = false
 
@@ -14,21 +14,17 @@ asknews = "^0.13.11"
 numpy = "^2.3.0"
 openai = "^2.0.0"
 python-dotenv = "^1.0.1"
-forecasting-tools = ">=0.2.90,<0.4.0"
-
-
-[tool.poetry.group.integrations]
-optional = true
-
-[tool.poetry.group.integrations.dependencies]
-lightningrod-ai = "^0.1.14"
-metaculus-bot-review = "^0.1.1"
+forecasting-tools = ">=0.3.0,<0.4.0"
 
 
 [tool.poetry.group.dev.dependencies]
-ipykernel = "^6.29.5"
+pytest = "^8.3.0"
+pyyaml = "^6.0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
-

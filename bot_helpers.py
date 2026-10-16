@@ -74,8 +74,8 @@ def check_environment(strict: bool = True) -> None:
     )
     if not has_llm_key:
         print(
-            "⚠️  No LLM key set (OPENROUTER/OPENAI/ANTHROPIC). The bot will fall back\n"
-            "    to the Metaculus LLM proxy. Free OpenRouter credits: "
+            "No LLM key set (OPENROUTER_API_KEY). The budget guard will stop the run\n"
+            "    before any LLM call. Free OpenRouter credits: "
             "https://forms.gle/aQdYMq9Pisrf1v7d8\n"
         )
 
