@@ -1,6 +1,30 @@
 # forecast-bot
 
-Metaculus 預測機器人，參加 Fall 2026 FutureEval 正賽＋MiniBench。v0.1.1。
+Metaculus 預測機器人，參加 Fall 2026 FutureEval 正賽＋MiniBench。v0.1.4。
+
+## 只有你能做的事（依序，做一次就好）
+金鑰只貼進網頁格子，不貼給任何人（包括 Claude）。標「按鈕名待確認」的，介面可能改版，找最像的那顆。
+
+1. **開 Metaculus 帳號**：到 metaculus.com 按 Sign up，用 email 註冊。不需要放照片或真名。
+2. **建 bot 帳號、拿 token**：登入後進 Settings → My Forecasting Bots → Create a Bot（按鈕名待確認）。名字建議 `midnightsharp-bot`。建好後複製它的 API Key（一長串字），先存進密碼管理員。
+3. **填參加表單**：https://forms.gle/aQdYMq9Pisrf1v7d8 。問到 open source 選「是」，網址填 https://github.com/doriely006/forecast-bot 。這張表同時是 AI 額度的申請。
+4. **等額度信，照信拿 OpenRouter 金鑰**：額度是 Metaculus 送的，照信上的說明拿金鑰。**不要自己儲值、不要綁信用卡。** 如果信要你在自己的 OpenRouter 帳號建 key，建的時候把上限設成送你的金額，並到 Credits 頁確認 auto top-up 是關的（按鈕名待確認）。申請被拒或一直沒來信 → 先停，跟 Claude 說，不要自己付錢。
+5. **把兩把金鑰貼進 GitHub**：本 repo 上方 Settings → 左側 Secrets and variables → Actions → Secrets 分頁 → New repository secret。
+   - Name 填 `METACULUS_TOKEN`，Secret 貼第 2 步的 API Key，按 Add secret。
+   - 再按一次 New repository secret，Name 填 `OPENROUTER_API_KEY`，貼第 4 步的金鑰，按 Add secret。
+   - 看到：清單出現這兩個名字，內容看不到（正常）。
+6. **試跑一次（不會送出任何預測）**：上方 Actions → 左側 Test Bot → Run workflow → 綠色 Run workflow。等幾分鐘點進最新一筆。
+   - 看到：最下面 Summary 第一行寫 DRY RUN，3 題都有預測。**把 Summary 截圖給 Claude 看**，有紅框就停在這裡。
+7. **打開排程**（Claude 看過第 6 步截圖說可以之後）：Settings → Secrets and variables → Actions → Variables 分頁 → New repository variable，Name 填 `BOT_ENABLED`，Value 只填 `1`。
+   - 看到：之後每 20 分鐘跑一次，還是只列題、不送出，Summary 第一行是 DRY RUN。
+8. **打開真的送出**（Claude 說可以之後）：同一個 Variables 分頁再加一個，Name 填 `PUBLISH`，Value 填 `1`。
+   - 看到：下一輪 Summary 第一行變成「已送出」。要停送出就刪掉 PUBLISH，要整個停就刪掉 BOT_ENABLED。
+
+### 之後的例行事項
+- 這個 repo 每 60 天內要有一次 commit，不然 GitHub 會停掉排程。滿 45 天 Summary 會出黃框提醒。
+- 賽季結束（約 2027 年 1 月）：填賽季末 survey，贏輸都要填，沒填下一季可能失格。
+- 每一季開賽前：重新申請 AI 額度。
+- 收到得獎通知後 180 天內：交 W-8BEN 和收款資料，逾期獎金沒收（日數來自搜尋摘要，以通知信為準）。
 
 ## 給你看的部分
 
@@ -13,30 +37,32 @@ Metaculus 預測機器人，參加 Fall 2026 FutureEval 正賽＋MiniBench。v0.
 - 11 月 1 日（第一輪 MiniBench 結算）以後，正賽拿大部分預算，MiniBench 改用最省的設定。兩個是分開的排行榜：MiniBench 省錢只影響「表現好會加碼額度」的機會，不影響正賽分數。
 - 沒有任何人工改單題預測的開關（比賽規則：no human in the loop）。
 
-### 只有你能做的事
-| 什麼時候 | 做什麼 |
-|---|---|
-| 開 `PUBLISH` 之前 | 填參加表單 https://forms.gle/aQdYMq9Pisrf1v7d8 。問到 open source 答「是」，附上 https://github.com/doriely006/forecast-bot （開源 bot 的額度大約加倍） |
-| 開 `PUBLISH` 之前 | 在 openrouter.ai 確認這把 key 的 **auto top-up 是關的**（不然它會刷你的卡） |
-| 開 `PUBLISH` 之前 | 放金鑰：repo 的 Settings -> Secrets and variables -> Actions -> Secrets，放 `METACULUS_TOKEN`（bot 帳號的 token）、`OPENROUTER_API_KEY` |
-| 開 `PUBLISH` 之前 | Actions -> 「Test Bot」-> Run workflow。它挑 3 題測試題跑完整流程但不送。Summary 沒有紅框、每題都有預測，就可以開開關 |
-| 賽季結束時（約 2027 年 1 月） | 填賽季末 bot survey。贏輸都要填，沒填下一季可能失格 |
-| 每一季開賽前 | 重新申請 LLM 額度（額度每季重發） |
-| 得獎通知後 180 天內 | 交 W-8BEN 和收款資料，逾期獎金沒收（這條來自比賽規則頁的搜尋摘要，原文沒讀到；收到通知時以通知為準） |
-| 最後一次 commit 後 60 天內 | 這個 repo 要有一次 commit，不然 GitHub 會停掉排程。滿 45 天 Summary 會出黃框提醒 |
-
 AskNews（另一個新聞來源）預設不用：申請要全名和 LinkedIn。
 
-### 開關（Settings -> Secrets and variables -> Actions -> **Variables** 分頁）
-只認 `1`。設成其他值（`0`、`true`、`yes`）那次執行會失敗並寫原因。
-| 變數 | 沒設 | 設成 1 |
+### 可選的 repo variables（Settings -> Secrets and variables -> Actions -> **Variables** 分頁）
+`BOT_ENABLED`、`PUBLISH` 只認 `1`；設成其他值（`0`、`true`、`yes`）那次執行會失敗並寫原因。其餘都是可選，沒設就用預設值。
+| 變數 | 用途 | 預設 |
 |---|---|---|
-| `BOT_ENABLED` | 排程完全不跑（不寄信） | 每 20 分鐘跑一次 |
-| `PUBLISH` | 試跑：只列出開著的題目和開放／截止時間，什麼都不送 | 真的送出預測＋說明 |
+| `BOT_ENABLED` | 排程開關：有設才每 20 分鐘跑 | 沒設＝排程不跑（不寄信） |
+| `PUBLISH` | 真的送出預測＋說明 | 沒設＝試跑，只列題不送 |
+| `MAX_QUESTION_FAILED_RUNS` | 同一題連續幾輪失敗就先跳過 | 3 |
+| `SKIP_COOLDOWN_HOURS` | 被跳過的題，隔幾小時再試一次 | 6 |
+| `DRY_RUN_LLM_MAX_QUESTIONS` | 手動勾「dry_run_llm」時 AI 試跑幾題 | 2 |
+| `TEST_MAX_QUESTIONS` | Test Bot 跑幾題 | 3 |
+| `MAIN_FORECAST_MODEL` | 正賽最終預測用的模型 | `openai/gpt-5.6-terra` |
+| `MINIBENCH_FORECAST_MODEL` | MiniBench 最終預測用的模型 | `openai/gpt-5.6-terra` |
+| `ASSUMED_BUDGET_USD` | key 沒設上限時假定的總額度 | 100 |
+| `BUDGET_STOP_BELOW` | 剩餘額度低於這個金額整個停 | 3 |
+| `BUDGET_RESERVE` | 配速時保留不花的額度 | 等於 `BUDGET_STOP_BELOW` |
+| `BUDGET_SPLIT_DATE` | 這天起正賽拿大部分預算 | 2026-11-01 |
+| `MAIN_BUDGET_SHARE` | 分界日後正賽佔預算比例 | 0.8 |
+| `MAIN_QUESTIONS_PER_DAY` / `MINIBENCH_QUESTIONS_PER_DAY` | 配速用的每日新題數估計 | 4 |
+| `SEASON_END` | 配速算到哪天 | 2027-01-01 |
+| `BINARY_MIN` / `BINARY_MAX` | 是非題送出機率下限／上限 | 0.03 / 0.97 |
+| `MC_MIN_PROB` | 選擇題每個選項最低機率 | 0.01 |
+| `BOT_USERNAME` | 排行榜用的 bot 帳號名 | 沒設就問 Metaculus `/users/me` |
 
-- 要關掉：把 `BOT_ENABLED` **刪掉**。立刻生效。
-- 只想停止送出、保留盤點：把 `PUBLISH` 刪掉。
-- 手動執行（Run workflow）也看 `PUBLISH`：沒設一律不送。手動執行正賽 workflow 時可以勾「dry_run_llm」，讓 AI 試跑 2 題（不送）。
+- 手動執行（Run workflow）也看 `PUBLISH`：沒設一律不送。
 
 ### 怎麼看它有沒有在跑
 1. GitHub：repo 的 **Actions** 分頁 -> 「Forecast on tournament questions」-> 點最新一次 -> 頁面下方 Summary。
@@ -95,8 +121,17 @@ Base: [Metaculus/metac-bot-template](https://github.com/Metaculus/metac-bot-temp
   (days to `SEASON_END` x `*_QUESTIONS_PER_DAY`). Richest affordable tier: 5 / 3 / 2 / 1 forecasts.
   From `BUDGET_SPLIT_DATE` (2026-11-01) the main tournament gets `MAIN_BUDGET_SHARE` (0.8) and MiniBench the
   1-forecast tier. Key without limit: remaining = `ASSUMED_BUDGET_USD` (100) - usage, yellow warning.
-- Per question: up to 3 attempts in this run (nothing carried to the next run). OpenRouter 401/402 anywhere in
-  the error chain stops the whole run at once, no retry.
+- Per question: up to 3 attempts within one run (`PER_QUESTION_RETRIES` = 2 extra). OpenRouter 401/402
+  anywhere in the error chain stops the whole run at once, no retry.
+- Cross-run failure count (`state.py`, via `actions/cache`, write-ahead: +1 and `last_attempt` are saved before
+  the question is forecast, so a killed job still leaves the count; one success resets it). After
+  `MAX_QUESTION_FAILED_RUNS` (default 3) consecutive failed runs the question is skipped with no LLM call;
+  `SKIP_COOLDOWN_HOURS` (default 6) after its last attempt it gets one more try. 401/402, budget skips and
+  stopped runs are not counted (the +1 is rolled back).
+- Health probe: if >= 2 questions were attempted in a run and all failed (no 401/402), `runner.py` makes one tiny
+  cheap-model call (up to 2 HTTP tries, 30 s each). Probe ok -> the failures are the questions' own, counts
+  stay. Probe failed -> treated as an upstream outage, all counts of that run are rolled back, red box in the
+  Summary. Probe 401/402 -> run stops, counts rolled back.
 - Final value changed in one place only: `_aggregate_predictions` -> `apply_final_guards` (binary clamp,
   MC floor, numeric aggregate unit check). The comment's "Final Prediction" is the submitted value.
 - Numeric: a forecaster whose median is off by >10x (positive ranges only: `median > 10*upper` or

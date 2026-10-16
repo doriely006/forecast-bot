@@ -2,6 +2,9 @@
 
 ## 收工日誌
 
+### 2026-10-16 README
+- README 修正（對應驗收 FAIL 1–4）：user 步驟全文置頂（八步＋例行事項）、版號 0.1.4、停損段改寫成跨輪計數＋探測、補 repo variables 清單。
+
 ### 2026-10-16 v0.1.4 毒題漏洞修補（SPEC 12.4 末行）
 - runner：`_upstream_suspect`（試 ≥2 且全 failed 非 fatal）現在只是「要不要探測」的條件。`_health_probe`：`probe_fn` 最多 `PROBE_ATTEMPTS`=2 次、各 `PROBE_TIMEOUT_S`=30 秒（asyncio.wait_for）。成功 -> `result.probe="ok"`、計數照舊、summary 黃框；非 401／402 失敗 -> `probe="failed"`＋`upstream_suspect`＋`store.rollback_all()`、紅框附 `probe_error`；401／402 -> `probe="fatal"`、設 `result.fatal`、rollback_all、不重試。`probe_fn=None` 不探測、照計數（測試預設）。
 - 花費：`probe_calls`／`probe_cost`（cheap 價 x 30 in／16 out token 粗估）；`spend` 有 key usage 時用 usage 差（已含探測），沒有時 outcomes＋probe_cost；summary 花費行尾註「含探測 N 次」。
