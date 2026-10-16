@@ -56,6 +56,7 @@
 - 開 BOT_ENABLED／PUBLISH 前，user 的 Test Bot Summary 截圖要先給主 session 看過（README 第 6–8 步已寫）。
 
 ## v0.2 清單
+- **MiniBench Claude 對照組（user 10-17 拍板）**：第一輪 MiniBench 結算後（約 11-01，C6 切便宜設定那天），MiniBench 的最終預測 model 換成 Claude（OpenRouter 上的 Anthropic 款），正賽維持 GPT。跑滿一輪 MiniBench 後，比兩邊非 metac 名次（standings.py），Claude 贏就提案正賽換。user 想押 Claude；參賽表單 models 欄已寫兩家＋這個計畫。
 - Date／Conditional 題型：碰到就記錄跳過（現況：Conditional 已跳過並列在 Summary；Date 仍會預測）。
 - 配速是否偏重 MiniBench（MiniBench 表現好會自動加碼額度）；現在是 11-01 後正賽 80%。
 - 失敗止血上線後盯：上游故障期間整批重試的實際花費；探測第一次真跑是否回 200。
