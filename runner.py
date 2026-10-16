@@ -158,6 +158,8 @@ class RunResult:
     llm_needed: bool = False
     skipped_failing: list[dict[str, Any]] = field(default_factory=list)  # failed MAX runs in a row
     fail_limit: int = 0
+    cooldown_hours: int = 0
+    upstream_suspect: bool = False  # v0.1.3: >=2 attempted, all failed non-fatally -> counts rolled back
     fatal: str = ""  # OpenRouter 401/402 mid-run: everything stopped (B3)
     usage_before: float | None = None
     usage_after: float | None = None
@@ -227,6 +229,7 @@ async def run(
     concurrency: int = 3,
     store: Any = None,
     today: date | None = None,
+    now: datetime | None = None,
 ) -> RunResult:
     env = dict(os.environ) if env is None else env
     lookup = key_lookup_fn()
@@ -263,7 +266,7 @@ async def run(
 
     to_forecast.sort(key=_close_key)  # closing soonest first
     if store is not None and mode == "tournament":
-        to_forecast = _drop_failing(store, to_forecast, env, result)
+        to_forecast = _drop_failing(store, to_forecast, env, result, now)
     if decision.remaining is not None:
         open_new = {k: 0 for k in budget.KINDS}
         for name, _ in to_forecast:
@@ -288,13 +291,18 @@ async def run(
 
         async def one(name: str, q: Any) -> Outcome:
             async with sem:
+                if store is not None and not stop.is_set():  # write-ahead (v0.1.3): the +1 hits the disk first
+                    store.begin_attempt(_qkey(q), q.question_text, q.page_url, now)
                 outcome = await forecast_one(
                     bots[budget.kind_of(name)], client, name, q, publish, key_lookup_fn, env, stop, result, store
                 )
-                _count_failure(store, name, q, outcome)
+                _count_failure(store, name, q, outcome, now)
                 return outcome
 
         result.outcomes = list(await asyncio.gather(*[one(n, q) for n, q in to_forecast]))
+        if store is not None and _upstream_suspect(result.outcomes):
+            result.upstream_suspect = True
+            store.rollback_all()
 
     after = key_lookup_fn().info if (decision.may_call_llm and to_forecast) else lookup.info
     if after is not None:
@@ -307,36 +315,47 @@ def _qkey(q: Any) -> str:
     return state_mod.question_key(q.id_of_question, q.id_of_post)
 
 
+def _upstream_suspect(outcomes: list[Outcome]) -> bool:
+    """>=2 questions really attempted and every one failed without a 401/402: look like an upstream outage."""
+    attempted = [o for o in outcomes if o.status not in ("skipped_budget", "stopped")]
+    return len(attempted) >= 2 and all(o.status == "failed" and not o.fatal for o in attempted)
+
+
 def _drop_failing(store: Any, to_forecast: list[tuple[str, Any]], env: dict[str, str],
-                  result: RunResult) -> list[tuple[str, Any]]:
-    """Stop-loss: questions that failed MAX_QUESTION_FAILED_RUNS runs in a row get no LLM call."""
+                  result: RunResult, now: datetime | None = None) -> list[tuple[str, Any]]:
+    """Stop-loss: questions that failed MAX_QUESTION_FAILED_RUNS runs in a row get no LLM call,
+    until SKIP_COOLDOWN_HOURS after their last attempt (then one more try)."""
     if not result.fetch_errors:  # a tournament we could not read must not wipe its counts
         store.prune_failures({_qkey(q) for _, q in to_forecast})
     result.fail_limit = state_mod.max_failed_runs(env)
-    dead = store.skipped(result.fail_limit)
+    result.cooldown_hours = state_mod.skip_cooldown_hours(env)
+    waiting, _due = store.split_skipped(result.fail_limit, result.cooldown_hours, now)
     kept = []
     for name, q in to_forecast:
-        item = dead.get(_qkey(q))
+        item = waiting.get(_qkey(q))
         if item is None:
             kept.append((name, q))
         else:
             result.skipped_failing.append(
                 {"id": _qkey(q), "title": q.question_text, "url": q.page_url,
-                 "count": int(item["count"]), "last_error": item.get("last_error", "")}
+                 "count": int(item["count"]), "last_error": item.get("last_error", ""),
+                 "next_retry": item["next_retry"]}
             )
     return kept
 
 
-def _count_failure(store: Any, tournament: str, q: Any, outcome: Outcome) -> None:
-    """No forecast sent (or produced, in a dry run) = +1; a forecast = reset. 401/402 never count."""
+def _count_failure(store: Any, tournament: str, q: Any, outcome: Outcome, now: datetime | None = None) -> None:
+    """The +1 was written before the attempt. A forecast = reset; a real failure keeps it and records why;
+    401/402, stopped and skipped_budget take it back."""
     if store is None:
         return
     key = _qkey(q)
     if outcome.status == "failed" and not outcome.fatal:
-        last = outcome.detail.split(" | ")[-1]
-        store.record_failure(key, q.question_text, q.page_url, last)
+        store.finish_failure(key, outcome.detail.split(" | ")[-1], now)
     elif outcome.status in ("submitted", "comment_failed", "dry_run"):
         store.clear_failure(key)
+    else:  # fatal failed, stopped, skipped_budget
+        store.rollback(key)
 
 
 class _ForecastOnlyClient:
@@ -449,15 +468,17 @@ def _asknews() -> str:
     return "on" if os.getenv("ASKNEWS_CLIENT_ID") and os.getenv("ASKNEWS_SECRET") else "off"
 
 
-def render_skipped(skipped: list[dict[str, Any]], limit: int | None = None) -> list[str]:
+def render_skipped(skipped: list[dict[str, Any]], limit: int | None = None, cooldown: int | None = None) -> list[str]:
     """Yellow block: questions skipped after repeated failures (id, title, count, last error)."""
     if not skipped:
         return []
     head = f"**{len(skipped)} 題連續失敗，已停止重試（不再呼叫 AI，省錢）**"
     if limit:
-        head += f"；要再試改 MAX_QUESTION_FAILED_RUNS（現在 {limit}），題目截止後自動消失"
+        head += (f"；失敗 {limit} 輪就停，冷卻 {cooldown} 小時後再試一次"
+                 f"（MAX_QUESTION_FAILED_RUNS／SKIP_COOLDOWN_HOURS），題目截止後自動消失")
     rows = ["> - " + f"{s['id']}｜{str(s['title'])[:60].replace(chr(10), ' ')}｜失敗 {s['count']} 次｜"
-            f"{' '.join(str(s.get('last_error', '')).split())[:200]}" for s in skipped]
+            f"{' '.join(str(s.get('last_error', '')).split())[:200]}｜下次重試 {s.get('next_retry', '-')} UTC"
+            for s in skipped]
     return ["", "> [!WARNING]", f"> {head}", *rows, ""]
 
 
@@ -474,13 +495,16 @@ def render_summary(r: RunResult, with_header: bool = True) -> str:
         lines.append(f"- 模型：{'；'.join(per)}；研究／解析 `{cheap}`＋原生搜尋；AskNews {_asknews()}")
     for reason in r.systemic:
         lines += _block("CAUTION", f"**停止／系統性問題**：{reason}")
+    if r.upstream_suspect:
+        lines += _block("CAUTION", "**疑似上游故障，本輪不計失敗**：這輪試了 "
+                        f"{r.failed} 題全部失敗（不是 401／402），失敗次數沒有累計，下一輪照常重試。")
     if r.decision.warning:
         lines += _block("WARNING", r.decision.warning)
     if r.fetch_errors and r.open_counts and not r.fetch_auth_error:
         for err in r.fetch_errors:
             lines += _block("WARNING", f"**抓題失敗（另一邊照跑）**：{err}")
     if with_header:  # with a precheck step above, it already lists these
-        lines += render_skipped(r.skipped_failing, r.fail_limit)
+        lines += render_skipped(r.skipped_failing, r.fail_limit, r.cooldown_hours)
     comment_failed = r.count("comment_failed")
     if comment_failed:
         lines += _block("CAUTION", f"**{comment_failed} 題的說明（comment）沒送出去**，預測已送；下一輪會自動補送。")

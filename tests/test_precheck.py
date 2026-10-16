@@ -1,4 +1,5 @@
 import urllib.error
+from datetime import datetime, timedelta, timezone
 
 import precheck
 import state
@@ -62,11 +63,12 @@ def env(**kw):
     return base
 
 
-def run(e, api=None, poster=None, age=1.0, tmp=None):
+def run(e, api=None, poster=None, age=1.0, tmp=None, now=None):
     if tmp is not None:
         e = dict(e, STATE_DIR=str(tmp))
+    extra = {"now": lambda: now} if now is not None else {}
     deps = precheck.Deps(get_json=api or Api(), post=poster or Poster(), sleep=lambda s: None,
-                         commit_age=lambda: age)
+                         commit_age=lambda: age, **extra)
     return precheck.run(e, deps)
 
 
@@ -201,3 +203,25 @@ def test_dry_llm_run_also_ignores_skipped_in_count_but_first_run_has_no_cache(tm
     api = Api(main=MAIN + [post(5, q(51))])
     code, work, text = run(env(PUBLISH="1"), api=api, tmp=tmp_path / "never-restored")
     assert code == 0 and work is True and "連續失敗" not in text
+
+
+def test_cooldown_decides_whether_a_skipped_question_is_work(tmp_path):  # v0.1.3
+    t0 = datetime(2026, 10, 16, 12, 0, tzinfo=timezone.utc)
+    api = Api(main=MAIN + [post(5, q(51))])
+    store = state.PendingComments.load(tmp_path)
+    for _ in range(3):
+        store.record_failure("51", "Question 5", "u", "RuntimeError: boom", now=t0)
+    code, work, text = run(env(PUBLISH="1"), api=api, tmp=tmp_path, now=t0 + timedelta(hours=5, minutes=59))
+    assert code == 0 and work is False and "到此結束" in text
+    assert "下次重試 2026-10-16 18:00 UTC" in text and "冷卻 6 小時" in text
+    code, work, text = run(env(PUBLISH="1"), api=api, tmp=tmp_path, now=t0 + timedelta(hours=6))
+    assert code == 0 and work is True and "還沒預測 1" in text and "連續失敗" not in text
+    # SKIP_COOLDOWN_HOURS is read; garbage and < 1 fall back to 6
+    for value, hours_later, expect in (("2", 2, True), ("2", 1, False), ("0", 5, False), ("x", 6, True)):
+        got = run(env(PUBLISH="1", SKIP_COOLDOWN_HOURS=value), api=api, tmp=tmp_path,
+                  now=t0 + timedelta(hours=hours_later))[1]
+        assert got is expect, (value, hours_later)
+    # an entry written by v0.1.2 (no timestamp) gets its one extra try at once
+    store.failures["51"].pop("last_attempt")
+    store.save()
+    assert run(env(PUBLISH="1"), api=api, tmp=tmp_path, now=t0)[1] is True

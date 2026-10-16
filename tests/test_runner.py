@@ -395,3 +395,134 @@ def test_skipped_question_does_not_use_the_cap_and_closed_ones_are_forgotten(fak
     client.fail_tournaments = {"MiniBench"}  # unreadable tournament: counts must survive
     do_run(client, publish=True, store=store)
     assert "2203" in store.failures
+
+
+# --- v0.1.3: upstream-outage rounds, cooldown, write-ahead (SPEC 12.5) ---
+
+from datetime import datetime, timedelta, timezone
+
+T0 = datetime(2026, 10, 16, 12, 0, tzinfo=timezone.utc)
+
+
+def _two_failing():
+    qs = load_fixture_questions()
+    a, b = qs["FutureEval Fall 2026"][0], qs["MiniBench"][2]  # keys 1101, 2203
+    a.question_text, b.question_text = "Fixture A ALWAYSFAILS", "Fixture B ALWAYSFAILS"
+    return FakeClient({"FutureEval Fall 2026": [a], "MiniBench": [b]}), a, b
+
+
+def _at(client, tmp_path, now, env=None, publish=True):
+    store = state.PendingComments.load(tmp_path)
+    return do_run(client, publish=publish, store=store, env=env, concurrency=1) if now is None else asyncio.run(
+        runner.run(mode="tournament", publish=publish, bot_factory=lambda k, t: main.make_bot(
+            MODELS[k][0], MODELS[k][1], t.forecasts, client), client=client,
+            key_lookup_fn=lambda: key(), version=main.VERSION, models=MODELS, prices=PRICES,
+            env=env or {}, tournaments=TOURNAMENTS, store=store, today=date(2026, 10, 16),
+            concurrency=1, now=now))
+
+
+def test_round_where_two_or_more_all_fail_counts_nothing(fake_llm, tmp_path):
+    client, _, _ = _two_failing()
+    for _ in range(5):  # never reaches the limit: an outage must not skip anything
+        before = len(fake_llm.calls)
+        r = _at(client, tmp_path, T0)
+        assert len(fake_llm.calls) > before and r.failed == 2 and r.upstream_suspect
+        assert state.PendingComments.load(tmp_path).failures == {}
+    assert "疑似上游故障，本輪不計失敗" in runner.render_summary(r)
+
+
+def test_single_failure_still_counts_and_mixed_round_counts_the_failure(fake_llm, tmp_path):
+    client, a, _ = _two_failing()
+    a.question_text = "Fixture A works"
+    r = _at(client, tmp_path, T0)
+    assert r.count("submitted") == 1 and r.failed == 1 and not r.upstream_suspect
+    assert state.PendingComments.load(tmp_path).failures["2203"]["count"] == 1
+    client2, _ = _only_failing()
+    r = _at(client2, tmp_path / "solo", T0)
+    assert r.failed == 1 and not r.upstream_suspect
+    assert state.PendingComments.load(tmp_path / "solo").failed_runs("2203") == 1
+
+
+def test_systemic_round_restores_the_old_entries_exactly(fake_llm, tmp_path):
+    client, _, _ = _two_failing()
+    store = state.PendingComments.load(tmp_path)
+    store.record_failure("1101", "t", "u", "old error", now=T0 - timedelta(hours=1))
+    store.record_failure("1101", "t", "u", "old error", now=T0 - timedelta(hours=1))
+    before = {k: dict(v) for k, v in store.failures.items()}
+    r = _at(client, tmp_path, T0)
+    assert r.upstream_suspect and state.PendingComments.load(tmp_path).failures == before
+
+
+def test_cooldown_blocks_then_allows_exactly_one_try_then_cools_again(fake_llm, tmp_path):
+    client, _ = _only_failing()
+    for _ in range(3):
+        _at(client, tmp_path, T0)
+    assert state.PendingComments.load(tmp_path).failed_runs("2203") == 3
+    before = len(fake_llm.calls)
+    r = _at(client, tmp_path, T0 + timedelta(hours=5, minutes=59))
+    assert len(fake_llm.calls) == before and r.outcomes == []
+    assert r.skipped_failing[0]["next_retry"] == "2026-10-16 18:00"
+    assert "下次重試 2026-10-16 18:00 UTC" in runner.render_summary(r)
+    r = _at(client, tmp_path, T0 + timedelta(hours=6))  # due: one attempt, fails again
+    assert len(fake_llm.calls) > before and len(r.outcomes) == 1 and r.failed == 1
+    assert state.PendingComments.load(tmp_path).failed_runs("2203") == 4
+    before = len(fake_llm.calls)
+    r = _at(client, tmp_path, T0 + timedelta(hours=11))  # cooling again from the new attempt
+    assert len(fake_llm.calls) == before and r.skipped_failing[0]["next_retry"] == "2026-10-17 00:00"
+    assert len(_at(client, tmp_path, T0 + timedelta(hours=12)).outcomes) == 1
+
+
+def test_cooldown_over_and_success_clears_the_count(fake_llm, tmp_path):
+    client, q = _only_failing()
+    for _ in range(3):
+        _at(client, tmp_path, T0)
+    q.question_text = "Fixture works now"
+    r = _at(client, tmp_path, T0 + timedelta(hours=7))
+    assert r.count("submitted") == 1 and state.PendingComments.load(tmp_path).failures == {}
+
+
+def test_cooldown_hours_env_parsing_and_limit(fake_llm, tmp_path):
+    assert [state.skip_cooldown_hours({"SKIP_COOLDOWN_HOURS": v}) for v in ("2", " 12 ", "0", "x", "")] == [2, 12, 6, 6, 6]
+    assert state.skip_cooldown_hours({}) == 6
+    client, _ = _only_failing()
+    env = {"SKIP_COOLDOWN_HOURS": "2"}
+    for _ in range(3):
+        _at(client, tmp_path, T0, env)
+    before = len(fake_llm.calls)
+    _at(client, tmp_path, T0 + timedelta(hours=1, minutes=59), env)
+    assert len(fake_llm.calls) == before
+    assert len(_at(client, tmp_path, T0 + timedelta(hours=2), env).outcomes) == 1
+
+
+class Killed(BaseException):
+    """The job dies (timeout, runner crash): nothing catches this."""
+
+
+def test_write_ahead_count_survives_a_run_killed_before_submit(fake_llm, tmp_path, monkeypatch):
+    client, _ = _only_failing("A question that works")
+
+    async def die(*args, **kwargs):  # the job is killed while the question is being forecast
+        assert state.PendingComments.load(tmp_path).failed_runs("2203") >= 1  # already on disk, mid-flight
+        raise Killed()
+
+    monkeypatch.setattr(runner, "forecast_one", die)
+    with pytest.raises(Killed):
+        _at(client, tmp_path, T0)
+    saved = state.PendingComments.load(tmp_path)
+    assert saved.failed_runs("2203") == 1 and client.predictions == []
+    assert saved.failures["2203"]["last_attempt"] == "2026-10-16T12:00:00+00:00"
+    for _ in range(2):  # three killed jobs in a row = skipped, same as three failed ones
+        with pytest.raises(Killed):
+            _at(client, tmp_path, T0)
+    assert state.PendingComments.load(tmp_path).failed_runs("2203") == 3
+
+
+def test_fatal_402_and_stopped_questions_take_their_write_ahead_back(fake_llm, tmp_path):
+    qs = load_fixture_questions()
+    qs["FutureEval Fall 2026"][2].question_text += " PAYMENT402"
+    store = state.PendingComments.load(tmp_path)
+    store.record_failure("1101", "t", "u", "old", now=T0)  # a stopped question that had an older count
+    r = do_run(FakeClient(qs), publish=True, concurrency=1, store=store)
+    assert r.count("stopped") == 6 and "402" in r.fatal
+    saved = state.PendingComments.load(tmp_path).failures
+    assert list(saved) == ["1101"] and saved["1101"]["count"] == 1 and saved["1101"]["last_error"] == "old"

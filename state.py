@@ -14,6 +14,11 @@ MAX_QUESTION_FAILED_RUNS the question is skipped (no LLM call). It never
 resends or reuses a failed forecast. 401/402 are run-wide problems and are
 never counted; one success resets the question to zero.
 
+v0.1.3: the count is write-ahead (+1 and `last_attempt` are saved BEFORE the
+question is forecast, so a killed job still leaves the count); fatal/stopped/
+budget-skipped and "upstream outage" runs roll the +1 back. A skipped question
+gets one more try SKIP_COOLDOWN_HOURS (default 6) after its last attempt.
+
 Every change also writes `.state/changed`, so the workflow saves a new cache
 entry only when something changed (an emptied store must be saved too,
 otherwise the next run would restore the older, non-empty one).
@@ -23,12 +28,13 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 MAX_RESEND_ATTEMPTS = 24  # about 8 hours at one run every 20 minutes
 DEFAULT_MAX_QUESTION_FAILED_RUNS = 3
+DEFAULT_SKIP_COOLDOWN_HOURS = 6
 
 
 def state_dir(env: dict[str, str] | None = None) -> Path:
@@ -46,6 +52,32 @@ def max_failed_runs(env: dict[str, str] | None = None) -> int:
     return value if value >= 1 else DEFAULT_MAX_QUESTION_FAILED_RUNS
 
 
+def skip_cooldown_hours(env: dict[str, str] | None = None) -> int:
+    """SKIP_COOLDOWN_HOURS; unset, empty, not a number or < 1 -> default 6."""
+    env = os.environ if env is None else env
+    try:
+        value = int(str(env.get("SKIP_COOLDOWN_HOURS", "")).strip())
+    except ValueError:
+        return DEFAULT_SKIP_COOLDOWN_HOURS
+    return value if value >= 1 else DEFAULT_SKIP_COOLDOWN_HOURS
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _stamp(t: datetime) -> str:
+    return t.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def _parse(value: Any) -> datetime | None:
+    try:
+        t = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
 def question_key(question_id: Any, post_id: Any) -> str:
     """Same key in precheck (QItem) and runner (SDK question)."""
     return str(question_id) if question_id is not None else f"p{post_id}"
@@ -61,6 +93,8 @@ class PendingComments:
     path: Path
     items: dict[str, dict[str, Any]] = field(default_factory=dict)
     failures: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # this run's write-ahead +1s: key -> the entry as it was before (None = no entry)
+    _wa: dict[str, dict[str, Any] | None] = field(default_factory=dict, repr=False)
 
     @classmethod
     def load(cls, directory: Path) -> "PendingComments":
@@ -121,22 +155,84 @@ class PendingComments:
     def failed_runs(self, key: str) -> int:
         return int(self.failures.get(key, {}).get("count", 0))
 
-    def record_failure(self, key: str, title: str, url: str, error: str) -> int:
+    def record_failure(self, key: str, title: str, url: str, error: str, now: datetime | None = None) -> int:
+        """Counts a failure NOW (no write-ahead). The runner uses begin_attempt instead."""
         item = self.failures.setdefault(key, {})
         item["count"] = int(item.get("count", 0)) + 1
-        item["title"] = title[:80]
-        item["url"] = url
-        item["last_error"] = " ".join(error.split())[:200]
+        self._fill(item, title, url, error, now)
         self.save()
         return item["count"]
 
+    @staticmethod
+    def _fill(item: dict[str, Any], title: str, url: str, error: str, now: datetime | None) -> None:
+        item["title"] = title[:80]
+        item["url"] = url
+        item["last_error"] = " ".join(error.split())[:200]
+        item["last_attempt"] = _stamp(now or _now())
+
+    def begin_attempt(self, key: str, title: str, url: str, now: datetime | None = None) -> None:
+        """Write-ahead: +1 and the attempt time hit the disk before the question is forecast."""
+        if key in self._wa:
+            return
+        prev = self.failures.get(key)
+        self._wa[key] = dict(prev) if prev is not None else None
+        item = self.failures.setdefault(key, {})
+        item["count"] = int(item.get("count", 0)) + 1
+        self._fill(item, title, url, item.get("last_error", "attempt started, no result recorded"), now)
+        self.save()
+
+    def finish_failure(self, key: str, error: str, now: datetime | None = None) -> None:
+        """The attempt failed for good: keep the write-ahead +1, record why."""
+        item = self.failures.get(key)
+        if item is not None:
+            item["last_error"] = " ".join(error.split())[:200]
+            item["last_attempt"] = _stamp(now or _now())
+            self.save()
+
+    def rollback(self, key: str) -> None:
+        """Takes back this run's write-ahead +1 (fatal 401/402, stopped, no budget)."""
+        if key not in self._wa:
+            return
+        prev = self._wa.pop(key)
+        if prev is None:
+            self.failures.pop(key, None)
+        else:
+            self.failures[key] = prev
+        self.save()
+
+    def rollback_all(self) -> int:
+        """Upstream-outage run: take back every +1 this run made."""
+        keys = list(self._wa)
+        for k in keys:
+            self.rollback(k)
+        return len(keys)
+
     def clear_failure(self, key: str) -> None:
+        self._wa.pop(key, None)
         if self.failures.pop(key, None) is not None:
             self.save()
 
     def skipped(self, limit: int) -> dict[str, dict[str, Any]]:
         """Questions that failed `limit` runs in a row."""
         return {k: v for k, v in self.failures.items() if int(v.get("count", 0)) >= limit}
+
+    def split_skipped(
+        self, limit: int, cooldown_hours: int, now: datetime | None = None
+    ) -> tuple[dict[str, dict[str, Any]], set[str]]:
+        """-> (still cooling: key -> entry plus `next_retry` UTC text, keys whose cooldown is over).
+
+        An entry without a readable `last_attempt` (written before v0.1.3) is due at once."""
+        now = now or _now()
+        waiting: dict[str, dict[str, Any]] = {}
+        due: set[str] = set()
+        for k, v in self.skipped(limit).items():
+            last = _parse(v.get("last_attempt"))
+            retry = last + timedelta(hours=cooldown_hours) if last else None
+            if retry is None or retry <= now:
+                due.add(k)
+            else:
+                waiting[k] = dict(v, next_retry=retry.strftime("%Y-%m-%d %H:%M"))
+        return waiting, due
 
     def prune_failures(self, keep: set[str]) -> None:
         """Forget counts of questions that are no longer waiting for a forecast."""

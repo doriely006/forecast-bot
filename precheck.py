@@ -29,7 +29,7 @@ from typing import Any, Callable
 import budget
 import state as state_mod
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 SWITCHES = ("BOT_ENABLED", "PUBLISH", "DRY_RUN_LLM")
 # Must equal forecasting_tools.MetaculusClient.CURRENT_AI_COMPETITION_ID /
 # CURRENT_MINIBENCH_ID (asserted in tests).
@@ -280,14 +280,15 @@ def _block(kind: str, text: str) -> list[str]:
     return ["", f"> [!{kind}]", f"> {text}", ""]
 
 
-def _skipped_block(stuck: list[dict[str, Any]], limit: int) -> list[str]:
+def _skipped_block(stuck: list[dict[str, Any]], limit: int, cooldown: int) -> list[str]:
     if not stuck:
         return []
     rows = [f"> - {s['id']}｜{s['title'][:60].replace(chr(10), ' ')}｜失敗 {s['count']} 次｜"
-            f"{' '.join(str(s['last_error']).split())[:200]}" for s in stuck]
+            f"{' '.join(str(s['last_error']).split())[:200]}｜下次重試 {s['next_retry']} UTC" for s in stuck]
     return ["", "> [!WARNING]",
-            f"> **{len(stuck)} 題連續失敗，已停止重試（不再呼叫 AI，省錢）**；"
-            f"要再試改 MAX_QUESTION_FAILED_RUNS（現在 {limit}），題目截止後自動消失", *rows, ""]
+            f"> **{len(stuck)} 題連續失敗，暫停重試（不再呼叫 AI，省錢）**；"
+            f"失敗 {limit} 輪就停，冷卻 {cooldown} 小時後再試一次"
+            "（MAX_QUESTION_FAILED_RUNS／SKIP_COOLDOWN_HOURS），題目截止後自動消失", *rows, ""]
 
 
 def write_out(name: str, value: str, env: dict[str, str]) -> None:
@@ -311,6 +312,7 @@ class Deps:
     post: Callable[..., int] = http_post_json
     sleep: Callable[[float], None] = time.sleep
     commit_age: Callable[[], float | None] = lambda: last_commit_age_days(datetime.now(timezone.utc))
+    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
 
 def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
@@ -362,13 +364,15 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
 
     decision = budget.decide(budget.fetch_key_info(env.get("OPENROUTER_API_KEY"), deps.get_json), env)
     fail_limit = state_mod.max_failed_runs(env)
-    dead = store.skipped(fail_limit)
+    cooldown = state_mod.skip_cooldown_hours(env)
+    # v0.1.2/3: questions that failed MAX_QUESTION_FAILED_RUNS runs in a row are not "work"
+    # until SKIP_COOLDOWN_HOURS after their last attempt; then they are work again (one more try)
+    dead, _due = store.split_skipped(fail_limit, cooldown, deps.now())
     todo = [it for it in items if it.supported and not it.forecasted]
-    # v0.1.2: questions that failed MAX_QUESTION_FAILED_RUNS runs in a row are not "work"
     new = [it for it in todo if state_mod.question_key(it.question_id, it.post_id) not in dead]
     stuck = [
         {"id": k, "title": it.title, "url": it.url, "count": int(dead[k]["count"]),
-         "last_error": dead[k].get("last_error", "")}
+         "last_error": dead[k].get("last_error", ""), "next_retry": dead[k]["next_retry"]}
         for it in todo
         if (k := state_mod.question_key(it.question_id, it.post_id)) in dead
     ]
@@ -389,7 +393,7 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
         f"- OpenRouter 額度：{decision.state}（{decision.reason}）",
     ]
     lines += pacing_lines(decision, items, env)
-    lines += _skipped_block(stuck, fail_limit)
+    lines += _skipped_block(stuck, fail_limit, cooldown)
     work = needs_llm and not systemic
     if publish:
         lines.append(f"- 這輪：{'有新題，進入預測' if work else '沒有要做的事，到此結束（不安裝套件）'}")
