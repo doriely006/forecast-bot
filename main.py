@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import logging
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from typing import Any
@@ -49,7 +50,7 @@ import guards  # noqa: E402
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
-VERSION = "0.1.5"
+VERSION = "0.2.0"
 
 # Model choice (explicit candidate lists, per-tournament config) lives in
 # budget.py so the light precheck step can use it without dependencies.
@@ -118,6 +119,240 @@ def build_llms(forecast_id: str, cheap_id: str) -> dict[str, Any]:
             model=f"openrouter/{cheap_id}", temperature=None, timeout=120, allowed_tries=2
         ),
     }
+
+
+# ---------------------------------------------------------- Anthropic (v0.2.0)
+# Used when there is no OpenRouter key (budget.select_provider). Official
+# `anthropic` SDK, not litellm. Never sent: temperature/top_p/top_k (400 since
+# 2026-10-21), `thinking` (always on for Opus 5.5; effort is the control),
+# tool_choice, assistant prefill.
+
+FALLBACK_BETA = "server-side-fallback-2026-07-01"  # pairs with fallbacks="default"
+WEB_SEARCH_TOOL = "web_search_20250305"  # basic variant; the dynamic-filtering ones are not listed for Haiku 5.5
+MAX_CONTINUATIONS = 3  # pause_turn continuations of one server-tool turn
+_CREDIT_TEXT = re.compile(r"credit balance|spend(?:ing)? (?:limit|cap)|usage limit|billing", re.I)
+
+
+class AnthropicCreditError(Exception):
+    """Credit used up / spend limit reached. status_code 402 -> runner's run-wide stop (no retry, not counted)."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.status_code = 402
+
+
+class AnthropicRefusal(RuntimeError):
+    """stop_reason == "refusal" (after any server-side fallback). Counts as an ordinary failure."""
+
+
+def anthropic_fatal(e: BaseException) -> BaseException | None:
+    """402, or a 400/429 whose message is about credit/spend limits -> AnthropicCreditError.
+    401 needs no mapping: the SDK's AuthenticationError already carries status_code 401."""
+    import anthropic
+
+    if isinstance(e, anthropic.APIStatusError):
+        msg = str(getattr(e, "message", "") or e)
+        if e.status_code == 402 or (e.status_code in (400, 429) and _CREDIT_TEXT.search(msg)):
+            return AnthropicCreditError(f"Anthropic credit/spend limit reached (HTTP {e.status_code}): {msg[:200]}")
+    return None
+
+
+def _no_retry_types() -> tuple[type[BaseException], ...]:
+    import anthropic
+
+    return (AnthropicCreditError, AnthropicRefusal, anthropic.AuthenticationError,
+            anthropic.PermissionDeniedError, anthropic.BadRequestError, anthropic.NotFoundError)
+
+
+class AnthropicLlm(GeneralLlm):
+    """GeneralLlm look-alike (so ForecastBot, structure_output and the retry/cost plumbing keep working)
+    whose direct call goes to the Anthropic Messages API instead of litellm."""
+
+    def __init__(self, model: str, client: Any, env: dict[str, str], record: Any, *, effort: str,
+                 max_tokens: int, web_search: bool = False, fallbacks: bool = False,
+                 allowed_tries: int = 2, retry_wait_s: float = 5.0) -> None:
+        super().__init__(model=model, temperature=None, timeout=600, allowed_tries=allowed_tries)
+        self.client, self.env, self.record = client, env, record
+        self.effort, self.max_tokens, self.retry_wait_s = effort, max_tokens, retry_wait_s
+        self.fallbacks = fallbacks
+        self.tools: list[dict[str, Any]] = []
+        if web_search:
+            self.tools.append({
+                "type": env.get("ANTHROPIC_WEB_SEARCH_TOOL") or WEB_SEARCH_TOOL,
+                "name": "web_search",
+                "max_uses": int(env.get("ANTHROPIC_WEB_SEARCH_MAX_USES") or 5),
+            })
+
+    def request_params(self, prompt: Any) -> dict[str, Any]:
+        system, messages = _to_anthropic_messages(prompt)
+        params: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "messages": messages,
+            "output_config": {"effort": self.effort},
+        }
+        if system:
+            params["system"] = system
+        if self.tools:
+            params["tools"] = self.tools
+        if self.fallbacks:
+            params["fallbacks"] = "default"
+            params["betas"] = [FALLBACK_BETA]
+        return params
+
+    async def _invoke_with_request_cost_time_and_token_limits_and_retry(self, prompt: Any) -> Any:
+        # Own retry loop: auth/credit/refusal/bad-request errors are never retried here (the SDK
+        # already retried 408/409/429/5xx and connection errors twice).
+        for attempt in range(max(1, self.allowed_tries)):
+            try:
+                return await self._mockable_direct_call_to_model(prompt)
+            except _no_retry_types():
+                raise
+            except Exception:
+                if attempt + 1 >= max(1, self.allowed_tries):
+                    raise
+                await asyncio.sleep(self.retry_wait_s * (attempt + 1))
+
+    async def _mockable_direct_call_to_model(self, prompt: Any) -> Any:
+        import anthropic
+        import budget
+        from forecasting_tools.ai_models.ai_utils.response_types import TextTokenCostResponse
+        from forecasting_tools.ai_models.resource_managers.monetary_cost_manager import MonetaryCostManager
+
+        params = self.request_params(prompt)
+        base_messages = list(params["messages"])
+        texts: list[str] = []
+        urls: list[str] = []
+        search_errors: list[str] = []
+        cost = 0.0
+        tokens_in = tokens_out = 0
+        stop_reason = None
+        for _ in range(1 + MAX_CONTINUATIONS):
+            try:
+                resp = await self.client.beta.messages.create(**params)
+            except anthropic.APIStatusError as e:
+                fatal = anthropic_fatal(e)
+                if fatal is not None:
+                    raise fatal from e
+                raise
+            usage = resp.usage.model_dump() if hasattr(resp.usage, "model_dump") else dict(resp.usage)
+            call_cost = budget.anthropic_usage_cost(usage, self.model, self.env)
+            cost += call_cost
+            tokens_in += int(usage.get("input_tokens") or 0)
+            tokens_out += int(usage.get("output_tokens") or 0)
+            self.record(call_cost)  # every call is booked, refusals included
+            MonetaryCostManager.increase_current_usage_in_parent_managers(call_cost)
+            stop_reason = resp.stop_reason
+            if stop_reason == "refusal":  # always checked before reading content
+                details = getattr(resp, "stop_details", None)
+                category = getattr(details, "category", None) if details is not None else None
+                raise AnthropicRefusal(f"{self.model} declined the request (refusal, category {category})")
+            for block in resp.content:
+                kind = getattr(block, "type", None)
+                if kind == "text":
+                    texts.append(block.text)
+                    for c in getattr(block, "citations", None) or []:
+                        url = getattr(c, "url", None)
+                        if url and url not in urls:
+                            urls.append(url)
+                elif kind == "web_search_tool_result" and not isinstance(block.content, list):
+                    # server-tool errors come back inside a 200, as an object instead of a result list
+                    search_errors.append(str(getattr(block.content, "error_code", "unknown")))
+            if stop_reason != "pause_turn":
+                break
+            params["messages"] = base_messages + [
+                {"role": "assistant", "content": [b.to_dict() if hasattr(b, "to_dict") else b for b in resp.content]}
+            ]
+        if search_errors:
+            logger.warning(f"Web search errors from {self.model}: {', '.join(search_errors)}")
+        answer = "".join(texts).strip()
+        if not answer:
+            raise RuntimeError(
+                f"{self.model} returned no text (stop_reason {stop_reason}"
+                + (f", web search errors: {', '.join(search_errors)}" if search_errors else "") + ")"
+            )
+        if stop_reason == "max_tokens":
+            logger.warning(f"{self.model} hit max_tokens={self.max_tokens}; the answer may be cut off")
+        if urls:
+            answer += "\n\nSources:\n" + "\n".join(f"- {u}" for u in urls[:20])
+        return TextTokenCostResponse(
+            data=answer,
+            prompt_tokens_used=tokens_in,
+            completion_tokens_used=tokens_out,
+            total_tokens_used=tokens_in + tokens_out,
+            model=self.model,
+            cost=cost,
+        )
+
+
+def supports_server_fallback(model: str) -> bool:
+    """Haiku 5.5 has no server-side fallback (a list 400s, "default" does nothing)."""
+    return not model.startswith("claude-haiku")
+
+
+def build_anthropic_llms(forecast_id: str, cheap_id: str, client: Any, env: dict[str, str],
+                         record: Any, **kw: Any) -> dict[str, Any]:
+    """Final forecasts on `forecast_id` (effort ANTHROPIC_EFFORT, default medium, refusal fallbacks on);
+    research on the cheap model with server web search; summary and parsing on the cheap model at low effort."""
+    fallbacks = env.get("ANTHROPIC_FALLBACKS", "").strip().lower() != "off"
+    max_tokens = int(env.get("ANTHROPIC_MAX_TOKENS") or 16000)
+
+    def llm(model: str, effort: str, tokens: int, web: bool = False) -> AnthropicLlm:
+        return AnthropicLlm(model, client, env, record, effort=effort, max_tokens=tokens, web_search=web,
+                            fallbacks=fallbacks and supports_server_fallback(model), **kw)
+
+    return {
+        "default": llm(forecast_id, env.get("ANTHROPIC_EFFORT") or "medium", max_tokens),
+        "researcher": llm(cheap_id, env.get("ANTHROPIC_RESEARCH_EFFORT") or "medium", max_tokens, web=True),
+        "summarizer": llm(cheap_id, "low", 4000),
+        "parser": llm(cheap_id, "low", 4000),
+    }
+
+
+def make_anthropic_probe(cheap_id: str, client: Any, record: Any, env: dict[str, str]) -> Any:
+    """v0.1.4 health probe on Anthropic: one tiny call, no SDK retry; any 200 means the upstream is up."""
+
+    async def probe() -> None:
+        import anthropic
+        import budget
+        import runner
+
+        c = client.with_options(max_retries=0, timeout=runner.PROBE_TIMEOUT_S) if hasattr(client, "with_options") else client
+        try:
+            resp = await c.beta.messages.create(
+                model=cheap_id, max_tokens=16, output_config={"effort": "low"},
+                messages=[{"role": "user", "content": 'Reply with the single word "ok".'}],
+            )
+        except anthropic.APIStatusError as e:
+            fatal = anthropic_fatal(e)
+            if fatal is not None:
+                raise fatal from e
+            raise
+        usage = resp.usage.model_dump() if hasattr(resp.usage, "model_dump") else dict(resp.usage)
+        record(budget.anthropic_usage_cost(usage, cheap_id, env))
+
+    return probe
+
+
+def make_spend_recorder(ledger: Any, env: dict[str, str]) -> Any:
+    """Books each Anthropic call into the current credit period (state.json, saved at once)."""
+    import budget
+
+    def record(usd: float) -> None:
+        start, _ = budget.credit_period(budget.utc_today(), budget.credit_reset_day(env))
+        ledger.add_spend(start.isoformat(), usd)
+
+    return record
+
+def _to_anthropic_messages(prompt: Any) -> tuple[str, list[dict[str, Any]]]:
+    """str -> one user message; a list of {role, content} dicts (GeneralLlm's shape) -> system text + the rest."""
+    if isinstance(prompt, str):
+        return "", [{"role": "user", "content": prompt}]
+    if isinstance(prompt, list):
+        system = "\n\n".join(str(m["content"]) for m in prompt if m.get("role") == "system")
+        rest = [{"role": m["role"], "content": m["content"]} for m in prompt if m.get("role") != "system"]
+        return system, rest
+    raise TypeError(f"unsupported prompt type for the Anthropic path: {type(prompt).__name__}")
 
 
 # --------------------------------------------------------------------- bot
@@ -575,7 +810,8 @@ class ForecastBot2026(ForecastBot):
 # --------------------------------------------------------------------- CLI
 
 
-def make_bot(forecast_id: str, cheap_id: str, forecasts: int, client: Any) -> ForecastBot2026:
+def make_bot(forecast_id: str, cheap_id: str, forecasts: int, client: Any,
+             llms: dict[str, Any] | None = None) -> ForecastBot2026:
     return ForecastBot2026(
         research_reports_per_question=1,
         predictions_per_research_report=forecasts,
@@ -584,7 +820,7 @@ def make_bot(forecast_id: str, cheap_id: str, forecasts: int, client: Any) -> Fo
         folder_to_save_reports_to=None,
         skip_previously_forecasted_questions=False,  # runner.py filters and counts
         extra_metadata_in_explanation=True,
-        llms=build_llms(forecast_id, cheap_id),
+        llms=llms if llms is not None else build_llms(forecast_id, cheap_id),
         metaculus_client=client,
     )
 
@@ -617,34 +853,44 @@ def cli(argv: list[str] | None = None) -> int:
     crash = "stopped before the run finished"
     try:
         check_environment(strict=True)
-        models = budget.fetch_models()
-        cheap_id = budget.pick_model(models, budget.CHEAP_CANDIDATES)
-        forecast_ids = {
-            "main": budget.pick_model(models, budget.FORECAST_CANDIDATES, env.get("MAIN_FORECAST_MODEL")),
-            "minibench": budget.pick_model(
-                models, budget.FORECAST_CANDIDATES, env.get("MINIBENCH_FORECAST_MODEL")
-            ),
-        }
-        prices = budget.model_prices(models, sorted({*forecast_ids.values(), cheap_id}))
-        register_prices_with_litellm(prices)
+        provider = budget.select_provider(env)
         client = MetaculusClient()
         # Tournament runs (dry or not) keep the failure counts; only publishing stores comments.
         store = state.PendingComments.load(state.state_dir(env)) if args.mode == "tournament" else None
+        if provider == "anthropic":  # v0.2.0
+            import anthropic
+
+            forecast_ids, cheap_id, prices = budget.provider_prices(env)
+            # the spend ledger lives in the same state file; Test Bot loads it only for the ledger
+            ledger = store if store is not None else state.PendingComments.load(state.state_dir(env))
+            record = make_spend_recorder(ledger, env)
+            aclient = anthropic.AsyncAnthropic(max_retries=2, timeout=600)
+            llms_for = lambda kind: build_anthropic_llms(forecast_ids[kind], cheap_id, aclient, env, record)  # noqa: E731
+            key_lookup_fn = lambda: budget.anthropic_lookup_from_store(env, ledger)  # noqa: E731
+            probe_fn = make_anthropic_probe(cheap_id, aclient, record, env)
+        else:
+            models = budget.fetch_models()
+            forecast_ids, cheap_id, prices = budget.provider_prices(env, models)
+            register_prices_with_litellm(prices)
+            llms_for = lambda kind: build_llms(forecast_ids[kind], cheap_id)  # noqa: E731
+            key_lookup_fn = lambda: budget.fetch_key_info(env.get("OPENROUTER_API_KEY"))  # noqa: E731
+            probe_fn = make_probe(cheap_id)
         result = asyncio.run(
             runner.run(
                 mode=args.mode,
                 publish=publish,
                 bot_factory=lambda kind, tier: make_bot(
-                    forecast_ids[kind], cheap_id, tier.forecasts, client
+                    forecast_ids[kind], cheap_id, tier.forecasts, client, llms_for(kind)
                 ),
                 client=client,
-                key_lookup_fn=lambda: budget.fetch_key_info(env.get("OPENROUTER_API_KEY")),
+                key_lookup_fn=key_lookup_fn,
                 version=VERSION,
                 models={k: (forecast_ids[k], cheap_id) for k in budget.KINDS},
                 prices={k: (prices[forecast_ids[k]], prices[cheap_id]) for k in budget.KINDS},
                 env=env,
                 store=store,
-                probe_fn=make_probe(cheap_id),
+                probe_fn=probe_fn,
+                provider=provider,
             )
         )
         crash = ""

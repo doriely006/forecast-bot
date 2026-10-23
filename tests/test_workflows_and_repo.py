@@ -76,7 +76,7 @@ def test_publish_comes_from_variable_and_keys_from_secrets():
     for name in ("tournament.yaml", "test_bot.yaml"):
         env = _run_env(name)
         assert env["PUBLISH"] == "${{ vars.PUBLISH }}"
-        for k in ("METACULUS_TOKEN", "OPENROUTER_API_KEY"):
+        for k in ("METACULUS_TOKEN", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
             assert env[k] == "${{ secrets.%s }}" % k
         assert not [k for k in env if "EXA" in k or "PERPLEXITY" in k]  # B10
 
@@ -86,7 +86,7 @@ def test_version_matches_pyproject():
 
     py = (ROOT / "pyproject.toml").read_text()
     version = re.search(r'^version = "([^"]+)"', py, re.M).group(1)
-    assert version == main.VERSION == precheck.VERSION == "0.1.5"
+    assert version == main.VERSION == precheck.VERSION == "0.2.0"
 
 
 def test_workflows_locked_down():  # B6, B10, override 3

@@ -29,7 +29,7 @@ from typing import Any, Callable
 import budget
 import state as state_mod
 
-VERSION = "0.1.5"
+VERSION = "0.2.0"
 SWITCHES = ("BOT_ENABLED", "PUBLISH", "DRY_RUN_LLM")
 # Must equal forecasting_tools.MetaculusClient.CURRENT_AI_COMPETITION_ID /
 # CURRENT_MINIBENCH_ID (asserted in tests).
@@ -50,6 +50,8 @@ def validate_switches(env: dict[str, str], event: str | None = None) -> list[str
             errors.append(
                 f'{name}="{value}" is not allowed: use 1 to turn it on, delete the variable to turn it off'
             )
+    if budget.provider_error(env):
+        errors.append(budget.provider_error(env))
     if event == "schedule" and env.get("BOT_ENABLED", "") != "1" and not errors:
         errors.append("scheduled run without BOT_ENABLED=1")
     return errors
@@ -230,21 +232,19 @@ def _money(x: float | None) -> str:
 
 
 def pacing_lines(decision: budget.BudgetDecision, items: list[QItem], env: dict[str, str]) -> list[str]:
-    """A2: per-question budget and projected run-out date (catalogue prices)."""
+    """A2: per-question budget and projected run-out date (catalogue prices; Anthropic: env/table prices,
+    paced until the next credit reset)."""
     if decision.remaining is None:
         return []
-    cheap = budget.pick_model(None, budget.CHEAP_CANDIDATES)
-    models = {
-        "main": budget.pick_model(None, budget.FORECAST_CANDIDATES, env.get("MAIN_FORECAST_MODEL")),
-        "minibench": budget.pick_model(None, budget.FORECAST_CANDIDATES, env.get("MINIBENCH_FORECAST_MODEL")),
-    }
-    prices = budget.model_prices(None, list(models.values()) + [cheap])
+    models, cheap, prices = budget.provider_prices(env, None)
     open_new = {k: 0 for k in budget.KINDS}
     for it in items:
         if it.supported and not it.forecasted:
             open_new[budget.kind_of(it.tournament)] += 1
-    p = budget.pace(decision.remaining, budget.utc_today(), env, open_new,
-                    {k: (prices[models[k]], prices[cheap]) for k in budget.KINDS})
+    today = budget.utc_today()
+    p = budget.pace(decision.remaining, today, env, open_new,
+                    {k: (prices[models[k]], prices[cheap]) for k in budget.KINDS},
+                    budget.pacing_horizon(env, today), budget.select_provider(env))
     parts = [
         f"{k}: {_money(v.per_question_budget)}／題 -> {v.tier.name}（{v.tier.forecasts} 次預測，估 {_money(v.est_cost)}）"
         for k, v in p.kinds.items()
@@ -362,7 +362,9 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
         for d in dropped:
             lines += _block("CAUTION", f"**放棄補送說明**（試了 {state_mod.MAX_RESEND_ATTEMPTS} 次）：{d.get('url', d['post_id'])}")
 
-    decision = budget.decide(budget.fetch_key_info(env.get("OPENROUTER_API_KEY"), deps.get_json), env)
+    provider = budget.select_provider(env)
+    label = budget.provider_label(provider)
+    decision = budget.decide(budget.lookup_for(env, store, deps.get_json, deps.now().date()), env)
     fail_limit = state_mod.max_failed_runs(env)
     cooldown = state_mod.skip_cooldown_hours(env)
     # v0.1.2/3: questions that failed MAX_QUESTION_FAILED_RUNS runs in a row are not "work"
@@ -380,9 +382,9 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
     dry_llm = env.get("DRY_RUN_LLM", "") == "1" and event == "workflow_dispatch"
     needs_llm = (publish and bool(new)) or (not publish and dry_llm)
     if publish and decision.systemic:
-        systemic.append(f"OpenRouter：{decision.reason}")
+        systemic.append(f"{label}：{decision.reason}")
     elif needs_llm and not decision.may_call_llm:
-        systemic.append(f"OpenRouter：{decision.reason}")
+        systemic.append(f"{label}：{decision.reason}")
     if decision.warning:
         lines += _block("WARNING", decision.warning)
 
@@ -390,8 +392,14 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
     lines += [
         f"- 開放題：{len(items)}（{per}）；已預測 {sum(it.forecasted for it in items)}；"
         f"還沒預測 {len(new)}；不支援的題型跳過 {len(unsupported)}",
-        f"- OpenRouter 額度：{decision.state}（{decision.reason}）",
+        f"- Provider：{provider}",
+        f"- {label} 額度：{decision.state}（{decision.reason}）",
     ]
+    if provider == "anthropic" and decision.remaining is not None:
+        start, nxt = budget.credit_period(deps.now().date(), budget.credit_reset_day(env))
+        lines.append(f"- Anthropic 本期（{start} 起，{nxt} 重置，本機記帳）：已花 "
+                     f"{_money(budget.anthropic_budget(env) - decision.remaining)}／預算 "
+                     f"{_money(budget.anthropic_budget(env))}")
     lines += pacing_lines(decision, items, env)
     lines += _skipped_block(stuck, fail_limit, cooldown)
     work = needs_llm and not systemic

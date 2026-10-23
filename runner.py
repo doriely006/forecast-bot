@@ -94,7 +94,8 @@ _FATAL_PATTERNS = [
 
 
 def llm_fatal_status(err: Any) -> int | None:
-    """401/402 from OpenRouter anywhere in an exception (chain, group) or text (B1, B3)."""
+    """401/402 (OpenRouter, or Anthropic incl. credit exhausted mapped to 402) anywhere in an exception
+    (chain, group) or text (B1, B3)."""
     seen: set[int] = set()
     stack = [err]
     while stack:
@@ -139,7 +140,7 @@ class Outcome:
     status: str  # submitted | comment_failed | dry_run | failed | skipped_budget | stopped
     detail: str = ""
     cost: float = 0.0
-    fatal: bool = False  # run-wide OpenRouter 401/402: not this question's fault, never counted
+    fatal: bool = False  # run-wide 401/402 (or Anthropic credit exhausted): not this question's fault, never counted
 
 
 @dataclass
@@ -167,7 +168,10 @@ class RunResult:
     probe_error: str = ""
     probe_calls: int = 0
     probe_cost: float = 0.0
-    fatal: str = ""  # OpenRouter 401/402 mid-run: everything stopped (B3)
+    fatal: str = ""  # 401/402 mid-run: everything stopped (B3)
+    provider: str = "openrouter"  # v0.2.0: "anthropic" when running on the Anthropic API
+    period: tuple[str, str] | None = None  # Anthropic credit period (start, next reset), ISO dates
+    budget_total: float | None = None  # Anthropic budget per credit period
     usage_before: float | None = None
     usage_after: float | None = None
     remaining_after: float | None = None
@@ -189,6 +193,12 @@ class RunResult:
             return max(0.0, self.usage_after - self.usage_before)
         return sum(o.cost for o in self.outcomes) + self.probe_cost
 
+    def label(self) -> str:
+        return budget.provider_label(self.provider)
+
+    def fatal_text(self, status: int) -> str:
+        return f"{self.label()} HTTP {status}: run stopped, nothing else attempted"
+
     @property
     def systemic(self) -> list[str]:
         """Reasons that turn the job red (B1). Single-question failures do not."""
@@ -196,7 +206,7 @@ class RunResult:
         if self.fatal:
             out.append(self.fatal)
         if self.llm_needed and self.decision.systemic:
-            out.append(f"OpenRouter: {self.decision.reason}")
+            out.append(f"{self.label()}: {self.decision.reason}")
         if self.fetch_auth_error or (self.fetch_errors and not self.open_counts):
             out.append("could not load questions: " + "; ".join(self.fetch_errors))
         attempted = [o for o in self.outcomes if o.status not in ("skipped_budget", "stopped")]
@@ -238,11 +248,19 @@ async def run(
     today: date | None = None,
     now: datetime | None = None,
     probe_fn: Callable[[], Awaitable[Any]] | None = None,
+    provider: str | None = None,
 ) -> RunResult:
     env = dict(os.environ) if env is None else env
+    provider = provider or budget.select_provider(env)
     lookup = key_lookup_fn()
     decision = budget.decide(lookup, env)
-    result = RunResult(version, mode, publish, decision, models)
+    result = RunResult(version, mode, publish, decision, models, provider=provider)
+    day = today or budget.utc_today()
+    horizon = None
+    if provider == "anthropic":
+        start, horizon = budget.credit_period(day, budget.credit_reset_day(env))
+        result.period = (start.isoformat(), horizon.isoformat())
+        result.budget_total = budget.anthropic_budget(env)
     result.usage_before = lookup.info.usage if lookup.info else None
     skip_forecasted = mode == "tournament"
 
@@ -279,7 +297,7 @@ async def run(
         open_new = {k: 0 for k in budget.KINDS}
         for name, _ in to_forecast:
             open_new[budget.kind_of(name)] += 1
-        result.pacing = budget.pace(decision.remaining, today or budget.utc_today(), env, open_new, prices)
+        result.pacing = budget.pace(decision.remaining, day, env, open_new, prices, horizon, provider)
     cap = max_forecasts_for(mode, publish, env)
     if cap is not None and len(to_forecast) > cap:
         result.not_attempted_cap = len(to_forecast) - cap
@@ -340,7 +358,7 @@ async def _health_probe(probe_fn: Callable[[], Awaitable[Any]], result: RunResul
             status = llm_fatal_status(e)
             if status:
                 result.probe, result.probe_error = "fatal", errors[-1]
-                result.fatal = result.fatal or f"OpenRouter HTTP {status}: run stopped, nothing else attempted"
+                result.fatal = result.fatal or result.fatal_text(status)
                 stop.set()
                 if store is not None:
                     store.rollback_all()
@@ -442,14 +460,14 @@ async def forecast_one(
             logger.warning(f"Forecast failed for {url}: {errors[-1]}")
             status = llm_fatal_status(e)
             if status:  # B3: no retry, the whole run stops
-                result.fatal = result.fatal or f"OpenRouter HTTP {status}: run stopped, nothing else attempted"
+                result.fatal = result.fatal or result.fatal_text(status)
                 stop.set()
                 return Outcome(tournament, title, url, "failed", " | ".join(errors), fatal=True)
     if report is None:
         return Outcome(tournament, title, url, "failed", " | ".join(errors))
     status = llm_fatal_status(" ".join(report.errors or []))
     if status:  # some forecasters hit 401/402 but enough succeeded: keep this one, stop the rest
-        result.fatal = result.fatal or f"OpenRouter HTTP {status}: run stopped, nothing else attempted"
+        result.fatal = result.fatal or result.fatal_text(status)
         stop.set()
 
     cost = report.price_estimate or 0.0
@@ -547,7 +565,11 @@ def render_summary(r: RunResult, with_header: bool = True) -> str:
     comment_failed = r.count("comment_failed")
     if comment_failed:
         lines += _block("CAUTION", f"**{comment_failed} 題的說明（comment）沒送出去**，預測已送；下一輪會自動補送。")
-    lines.append(f"- OpenRouter：{r.decision.state}（{r.decision.reason}）")
+    lines.append(f"- Provider：{r.provider}")
+    if r.provider == "anthropic" and r.period:
+        lines.append(f"- Anthropic 本期花費（{r.period[0]} 起，{r.period[1]} 重置，本機記帳）：{_money(r.usage_after)}"
+                     f"／預算 {_money(r.budget_total)}；剩餘 {_money(r.remaining_after)}")
+    lines.append(f"- {r.label()}：{r.decision.state}（{r.decision.reason}）")
     if r.pacing:
         parts = [f"{k} {_money(v.per_question_budget)}／題 -> {v.tier.name}" for k, v in r.pacing.kinds.items()]
         run_out = r.pacing.run_out.isoformat() if r.pacing.run_out else "n/a"
@@ -559,13 +581,13 @@ def render_summary(r: RunResult, with_header: bool = True) -> str:
         f"- 這輪新交：{r.new_ok}" + ("" if r.publish else "（dry run，沒送）"),
         f"- 失敗：{r.failed}",
         f"- 說明沒送出：{comment_failed}",
-        f"- 預算不足跳過：{r.count('skipped_budget')}；OpenRouter 停止後沒做：{r.count('stopped')}",
+        f"- 預算不足跳過：{r.count('skipped_budget')}；{r.label()} 停止後沒做：{r.count('stopped')}",
     ]
     if r.not_attempted_cap:
         lines.append(f"- 這輪上限外沒做：{r.not_attempted_cap}")
     lines += [
         f"- 這輪估計花費：{_money(r.spend)}" + (f"（含探測 {r.probe_calls} 次）" if r.probe_calls else ""),
-        f"- OpenRouter 剩餘：{_money(r.remaining_after)}",
+        f"- {r.label()} 剩餘：{_money(r.remaining_after)}",
     ]
     bad = [o for o in r.outcomes if o.status in ("failed", "comment_failed")]
     if bad:

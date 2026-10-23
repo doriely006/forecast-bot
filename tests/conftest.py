@@ -16,7 +16,8 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
-for _k in ("METACULUS_TOKEN", "OPENROUTER_API_KEY", "ASKNEWS_CLIENT_ID", "ASKNEWS_SECRET", "PUBLISH"):
+for _k in ("METACULUS_TOKEN", "OPENROUTER_API_KEY", "ASKNEWS_CLIENT_ID", "ASKNEWS_SECRET", "PUBLISH",
+           "ANTHROPIC_API_KEY", "LLM_PROVIDER"):
     os.environ.pop(_k, None)
 
 

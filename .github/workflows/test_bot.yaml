@@ -42,6 +42,13 @@ jobs:
       - name: Install dependencies (cache miss only)
         if: steps.venv-cache.outputs.cache-hit != 'true'
         run: poetry install --no-interaction --no-root --without dev
+      # v0.2.0: the Anthropic spend record lives in .state (same cache as the tournament workflow)
+      - name: Restore saved state (Anthropic spend record)
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .state
+          key: state-${{ github.run_id }}
+          restore-keys: state-
       - name: Run bot
         run: .venv/bin/python main.py --mode test_questions
         # Keys come only from repository secrets; switches from repository variables.
@@ -49,6 +56,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
           BOT_ENABLED: ${{ vars.BOT_ENABLED }}
@@ -61,3 +69,22 @@ jobs:
           BINARY_MIN: ${{ vars.BINARY_MIN }}
           BINARY_MAX: ${{ vars.BINARY_MAX }}
           MC_MIN_PROB: ${{ vars.MC_MIN_PROB }}
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
+          ANTHROPIC_FORECAST_MODEL: ${{ vars.ANTHROPIC_FORECAST_MODEL }}
+          ANTHROPIC_RESEARCH_MODEL: ${{ vars.ANTHROPIC_RESEARCH_MODEL }}
+          ANTHROPIC_FORECAST_PRICE: ${{ vars.ANTHROPIC_FORECAST_PRICE }}
+          ANTHROPIC_RESEARCH_PRICE: ${{ vars.ANTHROPIC_RESEARCH_PRICE }}
+          ANTHROPIC_EFFORT: ${{ vars.ANTHROPIC_EFFORT }}
+          ANTHROPIC_RESEARCH_EFFORT: ${{ vars.ANTHROPIC_RESEARCH_EFFORT }}
+          ANTHROPIC_MAX_TOKENS: ${{ vars.ANTHROPIC_MAX_TOKENS }}
+          ANTHROPIC_BUDGET_USD: ${{ vars.ANTHROPIC_BUDGET_USD }}
+          ANTHROPIC_CREDIT_RESET_DAY: ${{ vars.ANTHROPIC_CREDIT_RESET_DAY }}
+          ANTHROPIC_FALLBACKS: ${{ vars.ANTHROPIC_FALLBACKS }}
+          ANTHROPIC_WEB_SEARCH_TOOL: ${{ vars.ANTHROPIC_WEB_SEARCH_TOOL }}
+          ANTHROPIC_WEB_SEARCH_MAX_USES: ${{ vars.ANTHROPIC_WEB_SEARCH_MAX_USES }}
+      - name: Save state
+        if: always() && hashFiles('.state/changed') != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .state
+          key: state-${{ github.run_id }}-${{ github.run_attempt }}

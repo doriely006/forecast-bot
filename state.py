@@ -93,20 +93,26 @@ class PendingComments:
     path: Path
     items: dict[str, dict[str, Any]] = field(default_factory=dict)
     failures: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # v0.2.0: locally tracked Anthropic spend for the current credit period (the API exposes no balance)
+    spend: dict[str, Any] = field(default_factory=dict)
+    found: bool = True  # False when state.json did not exist / could not be read at load time
     # this run's write-ahead +1s: key -> the entry as it was before (None = no entry)
     _wa: dict[str, dict[str, Any] | None] = field(default_factory=dict, repr=False)
 
     @classmethod
     def load(cls, directory: Path) -> "PendingComments":
         path = directory / "state.json"
+        found = True
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            data = {}
+            data, found = {}, False
         return cls(
             path=path,
             items=dict(data.get("pending_comments", {})),
             failures=dict(data.get("question_failures", {})),
+            spend=dict(data.get("anthropic_spend", {})),
+            found=found,
         )
 
     def save(self) -> None:
@@ -114,7 +120,8 @@ class PendingComments:
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(
             json.dumps(
-                {"pending_comments": self.items, "question_failures": self.failures},
+                {"pending_comments": self.items, "question_failures": self.failures,
+                 "anthropic_spend": self.spend},
                 ensure_ascii=False,
                 indent=1,
             ),
@@ -241,3 +248,21 @@ class PendingComments:
             del self.failures[k]
         if gone:
             self.save()
+
+    # --- Anthropic spend per credit period (v0.2.0) ---
+
+    def period_spent(self, period_start: str) -> float:
+        """Spend recorded for the credit period starting `period_start` (ISO date); another period -> 0."""
+        if self.spend.get("period_start") != period_start:
+            return 0.0
+        return float(self.spend.get("spent", 0.0))
+
+    def add_spend(self, period_start: str, usd: float, now: datetime | None = None) -> float:
+        """Adds one call's cost and saves at once (a killed job keeps what it spent). New period -> starts at 0."""
+        if self.spend.get("period_start") != period_start:
+            self.spend = {"period_start": period_start, "spent": 0.0, "calls": 0}
+        self.spend["spent"] = round(float(self.spend.get("spent", 0.0)) + max(0.0, usd), 6)
+        self.spend["calls"] = int(self.spend.get("calls", 0)) + 1
+        self.spend["updated"] = _stamp(now or _now())
+        self.save()
+        return self.spend["spent"]

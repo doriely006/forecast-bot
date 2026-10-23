@@ -2,6 +2,20 @@
 
 ## 收工日誌
 
+### 2026-10-23 v0.2.0 Anthropic API 路徑（OpenRouter 額度沒到）
+- 選路：`budget.select_provider`。`LLM_PROVIDER`（anthropic|openrouter，其他值＝validate_switches 紅）；未設時有 OPENROUTER_API_KEY 走 openrouter（原行為不動），否則有 ANTHROPIC_API_KEY 走 anthropic。OpenRouter 路徑只換成 `provider_prices()` 包裝，內容同舊碼。
+- `anthropic` SDK 2.2.0 進 pyproject／poetry.lock（`poetry add --lock`，帶進 httpx2 等）。不走 litellm。
+- main.py `AnthropicLlm(GeneralLlm)`：覆寫 `_mockable_direct_call_to_model`＋自己的 retry（auth／credit／refusal／400／404 不重試，其他重試 1 次；SDK 自己 429/5xx 重試 2 次）。`client.beta.messages.create`；Opus 帶 `fallbacks="default"`＋beta `server-side-fallback-2026-07-01`，Haiku 不帶（Haiku 5.5 無 server-side fallback）。effort：forecast `ANTHROPIC_EFFORT`(medium)、research medium、summary／parser low。從不送 temperature/top_p/top_k/thinking/tool_choice、無 prefill。先查 `stop_reason=="refusal"` 再讀 content -> `AnthropicRefusal`（普通失敗）。research＝`web_search_20250305` max_uses 5（skill 的 dynamic-filter 版清單沒列 Haiku 5.5，故用 basic）；200 裡的 web_search error object 只 log；pause_turn 最多續 3 次；citations URL 附在研究尾。
+- 錯誤：`anthropic_fatal`：402，或 400/429 訊息含 credit balance／spend limit|cap／usage limit／billing -> `AnthropicCreditError(status_code=402)`；401 直接用 SDK 的 status_code。runner 既有 `llm_fatal_status` 吃得到，整輪停、不計數。fatal 字串改 `{Anthropic|OpenRouter} HTTP N`。
+- 記帳：`budget.anthropic_usage_cost`（usage.iterations 有就逐 attempt 依各自 model 計價；cache write 1.25x、read 0.1x 為假設；web search $0.01／次＝官方文件 10-23 實查；Haiku >100K input 用 0.50/2.50）。每次呼叫（含 refusal、探測）當下 `state.add_spend` 寫 `.state/state.json` 的 `anthropic_spend`（period_start／spent／calls）；換期歸零。期間＝`credit_period(today, ANTHROPIC_CREDIT_RESET_DAY=13)`，預算 `ANTHROPIC_BUDGET_USD`=90。
+- 預算：`anthropic_lookup_from_store` 偽裝成 KeyLookup（limit=預算、usage=本期已花），沿用 `decide()`／逐題 live 檢查；state.json 不存在 -> `KeyLookup.note` -> 黃框。`pace(..., horizon_end, provider)`：Anthropic 配速到下次重置日，tier 成本用 `A_*` token 假設。
+- Summary／precheck：多 `Provider：` 行、Anthropic 本期花費／預算／剩餘、標籤依 provider。precheck 不打 OpenRouter。探測 `make_anthropic_probe`：haiku、max_tokens 16、max_retries 0、任何 200＝ok，花費記帳。
+- workflow：兩支都轉接 `secrets.ANTHROPIC_API_KEY`＋`vars.LLM_PROVIDER`／`ANTHROPIC_*`（tournament 放 job env，precheck 與 main 都吃到）；Test Bot 加 `.state` cache restore/save（花費記錄）。
+- 測試：`.venv/bin/python -m pytest` -> 146 passed（舊 123＋新 23，`tests/test_anthropic.py`；舊檔只改版號斷言、secret 清單、conftest 清 ANTHROPIC_API_KEY／LLM_PROVIDER）。另用 httpx2 MockTransport 對真 SDK 驗過序列化（beta header、fallbacks、無 sampling 參數）與 400 credit -> 402（scratchpad，未進 repo）。
+- 每題估算（Anthropic，token 數未量測）：full $0.72／standard $0.45／lean $0.31／minimum $0.17。$87 可用、21 天到 11-13 -> standard。
+- 未驗（完全沒打真 API）：Opus 5.5 effort medium 的實際 thinking token（假設 6k out）；Haiku research 實際 input（假設 30k）；credit 用完的真實錯誤形狀（文件只寫 400 spend limit／402 billing／429 tier cap，「credit balance is too low」字串是 [K]）；`fallbacks="default"` 在 2.2.0 SDK 經 beta 端點是否被 API 接受；cache 計價倍率；Test Bot 與 tournament 同時跑時 `.state` cache 互蓋（後存者贏，可能丟一邊的花費／comment 狀態）。
+- 已知盲點：本機記帳看不到同 org 其他用量（Console、別支 key）；本期 10-13 起若已有花費，`ANTHROPIC_BUDGET_USD` 要先扣掉。403 PermissionDenied 沒列 fatal（會當普通失敗＋探測）。
+
 ### 2026-10-17 v0.1.5 最終 model 換 gpt-6.1-sol
 - budget.py：FORECAST_CANDIDATES＝gpt-6.1-sol -> gpt-5.6-terra -> gpt-5.4；`_EXCLUDED` 加 `codex`；FALLBACK_PRICES 加 6.1-sol／6-sol 2/10、6-astra 10/50、6-luna 0.10/0.50（10-17 實價，主 session 查）。main.py 沒動（預設走 FORECAST_CANDIDATES，正賽與 MiniBench 同步）。
 - 新預設 tier 每題：full(5) $0.303／standard(3) $0.196／lean(2) $0.143／minimum(1) $0.089。README 成本段與月花費同步，舊數字刪除。SPEC 12.2 後補 10-17 一行。
@@ -55,6 +69,7 @@
 - SDK 實讀：`publish_report_to_metaculus` 先 POST forecast 再 POST `/comments/create/`（`is_private=True`）；explanation 必須以 `#` 開頭；`get_all_open_questions_from_tournament` 只抓第一頁 100 題。
 
 ### 下一輪開工先做
+- v0.2.0 Anthropic：user 放 `ANTHROPIC_API_KEY` secret（不設 OPENROUTER_API_KEY 就自動走 Anthropic）、評估本期已花多少再設 `ANTHROPIC_BUDGET_USD` -> 手動跑 Test Bot（PUBLISH 未設）-> 對 Summary 的本期花費 vs Console 實際用量、log 有無 refusal／web search error／max_tokens 警告，校正 `A_*` token 假設。
 - user 放好 secrets、確認 auto top-up 關閉、填表單後：手動跑 Test Bot（PUBLISH 未設）-> 看 Summary 有無紅框、花費、log 裡 web search 有沒有引用來源。過了就設 BOT_ENABLED=1＋PUBLISH=1。
 - 第一次真跑後對：precheck 列題數＝main 抓到的題數；Summary 每題實際花費 vs 估算（tier 成本在 budget.py 的 token 假設，要校正）；standings 那段是否讀得到。
 - 45 天內要有 commit（公開 repo 排程 60 天停用）。
