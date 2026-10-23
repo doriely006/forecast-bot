@@ -2,6 +2,21 @@
 
 ## 收工日誌
 
+### 2026-10-24 v0.3.0 OpenAI 直連路徑（data-sharing 免費日額度）
+- 選路：`LLM_PROVIDER` 收 openai；未設時 OPENROUTER_API_KEY > ANTHROPIC_API_KEY > OPENAI_API_KEY。`provider_label`／`decide` key 名／`lookup_for`／`pacing_horizon`（月底）／`provider_prices`（cheap＝parse model）都加 openai 分支。
+- SDK：用已在依賴裡的官方 `openai` 2.13.0（poetry.lock 不動），Responses API。main.py `OpenAILlm(GeneralLlm)` 照 AnthropicLlm 模式：自己 retry（quota／401／403／400／404 不重試）、`reasoning.effort` 一律送（gpt-5.4 系預設 none）、不送 temperature/top_p。research＝`web_search` tool、`search_context_size` low、`max_tool_calls` 3；url_citation 附在研究尾；`status=="incomplete"` 只 log；refusal content part -> 普通失敗。
+- 模型（env 可換）：forecast gpt-5.4（big 組）、research／parse gpt-5.4-mini（mini 組）。`budget.free_group` 認 dated snapshot。
+- 記帳 `state.openai`（state.json `openai_usage`）：`day`＋`tokens{big,mini}`（UTC 日換日歸零）、`month`＋`spent`（月換歸零）。`openai_call_charge`：用 tool 的請求整筆付費且不計入免費 token（假設，`OPENAI_TOOL_TOKENS_FREE=1` 可翻）；越過日額度那一筆整筆付費（help 文章範例）；非免費清單 model 全付費（未列價格用 5/30 偏高估）；web search $0.01/次只數 action=search。
+- 配速 `openai_plan`：最豐 tier 使 (本輪題數＋今天剩餘時數×每日題數估計)×big token/題 ≤ 日額度×(1−10%)−已用。連 minimum 都放不下：塞得下的免費、截止 ≤30h 付費 minimum、其餘延後（不計失敗；Test Bot 不延後）。`openai_pacing` 生 Pacing 給 Summary（USD/題＝月剩餘/月底前預估題數）。precheck 跑同一個 plan，全延後＝work=false。
+- 美元：`OPENAI_BUDGET_USD`=4.5／月，`OPENAI_BUDGET_STOP_BELOW`=0.25（不吃 BUDGET_STOP_BELOW=3，不然 $4.5 只能花 $1.5）。
+- fatal：`openai_fatal`：402，或 code/type ∈ insufficient_quota／credit_balance_exhausted／organization|project_spend_limit_exceeded／organization_usage_limit_exceeded -> `OpenAIQuotaError(402)`；401 走 SDK 自帶 status_code。runner `_FATAL_PATTERNS` 加這些 code 字串（report.errors）。
+- Summary／precheck：`Provider：openai`、今日免費 token 各組已用／剩、本月付費／預算、延後題黃框、付費作答題數。
+- workflow：兩支都轉接 `secrets.OPENAI_API_KEY`＋19 個 `vars.OPENAI_*`（tournament 放 job env）。
+- 測試：`.venv/bin/python -m pytest` -> 167 passed（舊 146＋新 21 `tests/test_openai.py`；舊檔只改版號斷言、conftest 清 OPENAI_API_KEY）。另在 scratchpad 用 httpx MockTransport 對真 SDK 驗：請求序列化（instructions／reasoning／tools／max_tool_calls）、真 `Response` 物件解析含 url_citation、429 insufficient_quota -> 402（未進 repo）。
+- 估算（token 未量測）：big 組每題 full 55k／standard 33k／lean 22k／minimum 11k -> 225K 可用＝4／6／10／20 題/天。research 付費約 $0.0475/題 -> 可花 $4.25（扣 stop 線）約 89 題/月（約 3 題/天）；預設估 8 題/天＝約 $11/月，會在月中撞 stop。
+- 未驗（沒打真 API）：免費 token 是否真的不含 tool 請求的 token（help 文章 403，只有搜尋摘要「tool use is excluded」）；00:00 UTC 重置（搜尋摘要寫 2025-03-06 起，標假設）；Responses 預設 store=true 是否為 data sharing 資格前提（沒送 store，維持預設）；gpt-5.4 effort medium 的實際 reasoning token（假設 5k out）；research 實際 search content token（假設 15k）與每次 search 數；`max_output_tokens=16` 探測在 reasoning model 回 200 還是 400；reasoning 文件一句「effort none 回 400」與 model 頁「預設 none」矛盾（我們從不送 none）。
+- 已知盲點：本機記帳看不到同 org 其他流量（Playground、別支 key 吃同一份免費額度）；Test Bot 與 tournament 同時跑 `.state` 互蓋（v0.2.0 就有）；美元 stop 會連免費的 forecast 一起停（research 付費是唯一花費來源）。
+
 ### 2026-10-23 v0.2.0 Anthropic API 路徑（OpenRouter 額度沒到）
 - 選路：`budget.select_provider`。`LLM_PROVIDER`（anthropic|openrouter，其他值＝validate_switches 紅）；未設時有 OPENROUTER_API_KEY 走 openrouter（原行為不動），否則有 ANTHROPIC_API_KEY 走 anthropic。OpenRouter 路徑只換成 `provider_prices()` 包裝，內容同舊碼。
 - `anthropic` SDK 2.2.0 進 pyproject／poetry.lock（`poetry add --lock`，帶進 httpx2 等）。不走 litellm。
@@ -69,6 +84,7 @@
 - SDK 實讀：`publish_report_to_metaculus` 先 POST forecast 再 POST `/comments/create/`（`is_private=True`）；explanation 必須以 `#` 開頭；`get_all_open_questions_from_tournament` 只抓第一頁 100 題。
 
 ### 下一輪開工先做
+- v0.3.0 OpenAI：user 放 `OPENAI_API_KEY` secret（另兩把 key 不設，或設 `LLM_PROVIDER=openai`）、確認 org data sharing 開著 -> 手動 Test Bot（PUBLISH 未設）-> 對 Summary 今日免費 token 與 OpenAI usage 頁、log 有無 incomplete／web search 引用，校正 `O_*` token 假設；research 花費撐不到月底就考慮 `OPENAI_WEB_SEARCH_MAX_CALLS=1`。
 - v0.2.0 Anthropic：user 放 `ANTHROPIC_API_KEY` secret（不設 OPENROUTER_API_KEY 就自動走 Anthropic）、評估本期已花多少再設 `ANTHROPIC_BUDGET_USD` -> 手動跑 Test Bot（PUBLISH 未設）-> 對 Summary 的本期花費 vs Console 實際用量、log 有無 refusal／web search error／max_tokens 警告，校正 `A_*` token 假設。
 - user 放好 secrets、確認 auto top-up 關閉、填表單後：手動跑 Test Bot（PUBLISH 未設）-> 看 Summary 有無紅框、花費、log 裡 web search 有沒有引用來源。過了就設 BOT_ENABLED=1＋PUBLISH=1。
 - 第一次真跑後對：precheck 列題數＝main 抓到的題數；Summary 每題實際花費 vs 估算（tier 成本在 budget.py 的 token 假設，要校正）；standings 那段是否讀得到。

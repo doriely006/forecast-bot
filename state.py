@@ -95,6 +95,8 @@ class PendingComments:
     failures: dict[str, dict[str, Any]] = field(default_factory=dict)
     # v0.2.0: locally tracked Anthropic spend for the current credit period (the API exposes no balance)
     spend: dict[str, Any] = field(default_factory=dict)
+    # v0.3.0: OpenAI free tokens per UTC day and group, plus paid USD per calendar month
+    openai: dict[str, Any] = field(default_factory=dict)
     found: bool = True  # False when state.json did not exist / could not be read at load time
     # this run's write-ahead +1s: key -> the entry as it was before (None = no entry)
     _wa: dict[str, dict[str, Any] | None] = field(default_factory=dict, repr=False)
@@ -112,6 +114,7 @@ class PendingComments:
             items=dict(data.get("pending_comments", {})),
             failures=dict(data.get("question_failures", {})),
             spend=dict(data.get("anthropic_spend", {})),
+            openai=dict(data.get("openai_usage", {})),
             found=found,
         )
 
@@ -121,7 +124,7 @@ class PendingComments:
         tmp.write_text(
             json.dumps(
                 {"pending_comments": self.items, "question_failures": self.failures,
-                 "anthropic_spend": self.spend},
+                 "anthropic_spend": self.spend, "openai_usage": self.openai},
                 ensure_ascii=False,
                 indent=1,
             ),
@@ -266,3 +269,31 @@ class PendingComments:
         self.spend["updated"] = _stamp(now or _now())
         self.save()
         return self.spend["spent"]
+
+    # --- OpenAI free tokens per UTC day, paid USD per month (v0.3.0) ---
+
+    def openai_free_used(self, day: str) -> dict[str, int]:
+        """Free-group tokens used on UTC day `day` (ISO date); another day -> {} (the allowance reset)."""
+        if self.openai.get("day") != day:
+            return {}
+        return {g: int(v) for g, v in (self.openai.get("tokens") or {}).items()}
+
+    def openai_month_spent(self, month: str) -> float:
+        if self.openai.get("month") != month:
+            return 0.0
+        return float(self.openai.get("spent", 0.0))
+
+    def add_openai(self, day: str, month: str, group: str | None, tokens: int, usd: float,
+                   now: datetime | None = None) -> None:
+        """Books one call and saves at once. New UTC day -> token counts restart; new month -> USD restarts."""
+        o = self.openai
+        if o.get("day") != day:
+            o["day"], o["tokens"] = day, {}
+        if o.get("month") != month:
+            o["month"], o["spent"] = month, 0.0
+        if group and tokens:
+            o["tokens"][group] = int(o["tokens"].get(group, 0)) + int(tokens)
+        o["spent"] = round(float(o.get("spent", 0.0)) + max(0.0, usd), 6)
+        o["calls"] = int(o.get("calls", 0)) + 1
+        o["updated"] = _stamp(now or _now())
+        self.save()

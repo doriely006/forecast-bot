@@ -21,7 +21,7 @@ import os
 import re
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -57,6 +57,7 @@ class KeyLookup:
     http_status: int | None = None
     provider: str = "openrouter"
     note: str = ""  # yellow note carried into the decision (e.g. Anthropic spend state missing)
+    free: dict[str, tuple[int, int]] | None = None  # v0.3.0 OpenAI: group -> (free tokens used today, allowance)
 
 
 @dataclass
@@ -117,10 +118,11 @@ def fetch_key_info(
 
 def decide(lookup: KeyLookup, env: dict[str, str] | None = None) -> BudgetDecision:
     env = dict(os.environ) if env is None else env
-    stop_below = _env_float(env, "BUDGET_STOP_BELOW", 3.0)
+    # v0.3.0: the OpenAI budget is a few dollars, so it has its own (lower) stop line
+    stop_below = openai_stop_below(env) if lookup.provider == "openai" else _env_float(env, "BUDGET_STOP_BELOW", 3.0)
     info = lookup.info
     label = provider_label(lookup.provider)
-    key_name = "ANTHROPIC_API_KEY" if lookup.provider == "anthropic" else "OPENROUTER_API_KEY"
+    key_name = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}.get(lookup.provider, "OPENROUTER_API_KEY")
     if info is None:
         if lookup.http_status in (401, 403):
             return BudgetDecision("auth_error", None, f"{label} key rejected (HTTP {lookup.http_status})")
@@ -314,19 +316,20 @@ def utc_today() -> date:
 # The Anthropic API exposes no credit balance, so spend is tracked locally
 # (state.py) from each response's usage and paced per credit period.
 
-PROVIDERS = ("anthropic", "openrouter")
+PROVIDERS = ("anthropic", "openai", "openrouter")
 
 
 def provider_error(env: dict[str, str]) -> str:
     raw = (env.get("LLM_PROVIDER") or "").strip().lower()
     if raw and raw not in PROVIDERS:
-        return f'LLM_PROVIDER="{env.get("LLM_PROVIDER")}" is not allowed: use anthropic or openrouter, or delete it'
+        return f'LLM_PROVIDER="{env.get("LLM_PROVIDER")}" is not allowed: use openrouter, anthropic or openai, or delete it'
     return ""
 
 
 def select_provider(env: dict[str, str] | None = None) -> str:
     """LLM_PROVIDER if set; else OpenRouter when its key is present (unchanged behaviour), else Anthropic
-    when its key is present, else openrouter (whose guard then reports the missing key)."""
+    when its key is present, else OpenAI (v0.3.0) when its key is present, else openrouter (whose guard then
+    reports the missing key)."""
     env = dict(os.environ) if env is None else env
     raw = (env.get("LLM_PROVIDER") or "").strip().lower()
     if raw in PROVIDERS:
@@ -337,11 +340,13 @@ def select_provider(env: dict[str, str] | None = None) -> str:
         return "openrouter"
     if env.get("ANTHROPIC_API_KEY"):
         return "anthropic"
+    if env.get("OPENAI_API_KEY"):
+        return "openai"
     return "openrouter"
 
 
 def provider_label(provider: str) -> str:
-    return "Anthropic" if provider == "anthropic" else "OpenRouter"
+    return {"anthropic": "Anthropic", "openai": "OpenAI"}.get(provider, "OpenRouter")
 
 
 ANTHROPIC_FORECAST_MODEL = "claude-opus-5-5"
@@ -475,11 +480,15 @@ def lookup_for(env: dict[str, str], store: Any = None,
     """Budget lookup for whichever provider this run uses."""
     if select_provider(env) == "anthropic":
         return anthropic_lookup_from_store(env, store, today)
+    if select_provider(env) == "openai":
+        return openai_lookup_from_store(env, store, today)
     return fetch_key_info(env.get("OPENROUTER_API_KEY"), get_json)
 
 
 def pacing_horizon(env: dict[str, str], today: date) -> date | None:
-    """Anthropic: pace until the next credit reset. OpenRouter: None (= SEASON_END)."""
+    """Anthropic: pace until the next credit reset. OpenAI: month end. OpenRouter: None (= SEASON_END)."""
+    if select_provider(env) == "openai":
+        return month_end(today)
     if select_provider(env) != "anthropic":
         return None
     return credit_period(today, credit_reset_day(env))[1]
@@ -492,9 +501,251 @@ def provider_prices(env: dict[str, str], models: list[dict[str, Any]] | None = N
         fid, cheap = anthropic_models(env)
         ids = {k: fid for k in KINDS}
         return ids, cheap, {m: anthropic_price(m, env) for m in {fid, cheap}}
+    if select_provider(env) == "openai":  # v0.3.0: "cheap" = the parse/summary model; prices without the cached rate
+        fid, _research, parse = openai_models(env)
+        ids = {k: fid for k in KINDS}
+        return ids, parse, {m: (openai_price(m, env)[0], openai_price(m, env)[2]) for m in {fid, parse}}
     cheap = pick_model(models, CHEAP_CANDIDATES)
     ids = {
         "main": pick_model(models, FORECAST_CANDIDATES, env.get("MAIN_FORECAST_MODEL")),
         "minibench": pick_model(models, FORECAST_CANDIDATES, env.get("MINIBENCH_FORECAST_MODEL")),
     }
     return ids, cheap, model_prices(models, sorted({*ids.values(), cheap}))
+
+
+# ------------------------------------------------------------------- OpenAI (v0.3.0)
+# Direct OpenAI API, built around the data-sharing free daily tokens: a "big" and a
+# "mini" model group, each with its own daily token allowance. Forecast and parse
+# calls (no tools) normally stay inside the allowance; the research call uses the
+# web_search tool and is assumed billed in full (tool use is excluded from the
+# free tokens). Everything not free is booked in USD per calendar month.
+
+FREE_BIG_MODELS = {"gpt-5.4", "gpt-5.2", "gpt-5.1", "gpt-5", "gpt-4.1", "gpt-4o", "o1", "o3"}
+FREE_MINI_MODELS = {"gpt-5.4-mini", "gpt-5.4-nano", "gpt-5-mini", "gpt-5-nano", "gpt-4.1-mini",
+                    "gpt-4.1-nano", "gpt-4o-mini", "o3-mini", "o4-mini"}
+OPENAI_FORECAST_MODEL = "gpt-5.4"
+OPENAI_RESEARCH_MODEL = "gpt-5.4-mini"
+OPENAI_PARSE_MODEL = "gpt-5.4-mini"
+OPENAI_PRICES_PER_MTOK = {  # (input, cached input, output) USD per 1M tokens; developers.openai.com 2026-10-24
+    "gpt-5.4": (2.50, 0.25, 15.00),
+    "gpt-5.4-mini": (0.75, 0.075, 4.50),
+    "gpt-5.4-nano": (0.20, 0.02, 1.25),
+    "gpt-5-mini": (0.25, 0.025, 2.00),
+}
+OPENAI_UNKNOWN_PER_MTOK = (5.0, 0.5, 30.0)  # unlisted model without a price variable: assume dear
+OPENAI_WEB_SEARCH_COST = 0.01  # $10 per 1,000 web_search calls (pricing page 2026-10-24)
+DEFAULT_FREE_DAILY = {"big": 250_000, "mini": 2_500_000}
+_SNAPSHOT = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+
+# Token assumptions per call on OpenAI (input, output incl. reasoning). Unmeasured.
+O_FORECAST_TOKENS = (6_000, 5_000)  # gpt-5.4, reasoning effort medium
+O_PARSE_TOKENS = (2_500, 600)  # 2 parser calls per forecast
+O_RESEARCH_TOKENS = (15_000, 2_500)  # search content comes back as billed input tokens
+O_SEARCHES_PER_RESEARCH = 2.5  # max_tool_calls default 3
+DEFER_IF_CLOSES_AFTER_H = 30
+
+
+def openai_models(env: dict[str, str]) -> tuple[str, str, str]:
+    """-> (final forecast model, research model, parse/summary model)."""
+    return (
+        (env.get("OPENAI_FORECAST_MODEL") or OPENAI_FORECAST_MODEL).strip(),
+        (env.get("OPENAI_RESEARCH_MODEL") or OPENAI_RESEARCH_MODEL).strip(),
+        (env.get("OPENAI_PARSE_MODEL") or OPENAI_PARSE_MODEL).strip(),
+    )
+
+
+def free_group(model: str) -> str | None:
+    """'big' | 'mini' | None (not in the free lists). Dated snapshots count as their base model."""
+    base = _SNAPSHOT.sub("", (model or "").strip().lower())
+    if base in FREE_BIG_MODELS:
+        return "big"
+    if base in FREE_MINI_MODELS:
+        return "mini"
+    return None
+
+
+def free_daily_limits(env: dict[str, str]) -> dict[str, int]:
+    return {"big": int(_env_float(env, "OPENAI_FREE_DAILY_BIG", DEFAULT_FREE_DAILY["big"])),
+            "mini": int(_env_float(env, "OPENAI_FREE_DAILY_MINI", DEFAULT_FREE_DAILY["mini"]))}
+
+
+def free_margin(env: dict[str, str]) -> float:
+    """Share of each daily allowance kept unused by pacing (other traffic, estimate error). Default 0.1."""
+    return min(0.9, max(0.0, _env_float(env, "OPENAI_FREE_MARGIN", 0.1)))
+
+
+def openai_price(model: str, env: dict[str, str]) -> tuple[float, float, float]:
+    """USD per token (input, cached input, output). OPENAI_{FORECAST,RESEARCH,PARSE}_PRICE ('in/out' per
+    million tokens; cached = 10% of input) override the table for the configured models."""
+    names = dict(zip(openai_models(env), ("FORECAST", "RESEARCH", "PARSE")))
+    override = _per_mtok(env.get(f"OPENAI_{names[model]}_PRICE")) if model in names else None
+    if override:
+        per = (override[0], override[0] * 0.1, override[1])
+    else:
+        per = OPENAI_PRICES_PER_MTOK.get(_SNAPSHOT.sub("", model), OPENAI_UNKNOWN_PER_MTOK)
+    return per[0] / 1e6, per[1] / 1e6, per[2] / 1e6
+
+
+def openai_token_cost(usage: dict[str, Any], model: str, env: dict[str, str]) -> float:
+    """Standard-rate USD for one Responses API usage object (cached input at the cached rate)."""
+    pin, pcached, pout = openai_price(model, env)
+    inp = int(usage.get("input_tokens") or 0)
+    cached = int((usage.get("input_tokens_details") or {}).get("cached_tokens") or 0)
+    out = int(usage.get("output_tokens") or 0)
+    return (inp - cached) * pin + cached * pcached + out * pout
+
+
+def usage_tokens(usage: dict[str, Any]) -> int:
+    return int(usage.get("total_tokens") or (int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)))
+
+
+def tool_tokens_free(env: dict[str, str]) -> bool:
+    """ASSUMPTION (default off): a request that used a tool gets no free tokens at all."""
+    return (env.get("OPENAI_TOOL_TOKENS_FREE") or "").strip() == "1"
+
+
+def openai_call_charge(usage: dict[str, Any], model: str, env: dict[str, str], used_today: dict[str, int],
+                       web_searches: int = 0, used_tool: bool = False) -> tuple[str | None, int, float]:
+    """-> (free group the tokens count against or None, tokens to add to it, USD to book).
+    A request that would take the group past its daily allowance is charged in full (help-article example)."""
+    tokens = usage_tokens(usage)
+    searches = web_searches * _env_float(env, "OPENAI_WEB_SEARCH_COST", OPENAI_WEB_SEARCH_COST)
+    group = free_group(model)
+    if group is None or (used_tool and not tool_tokens_free(env)):
+        return None, 0, openai_token_cost(usage, model, env) + searches
+    limit = free_daily_limits(env)[group]
+    over = int(used_today.get(group, 0)) + tokens > limit
+    return group, tokens, (openai_token_cost(usage, model, env) if over else 0.0) + searches
+
+
+def month_key(today: date) -> str:
+    return today.strftime("%Y-%m")
+
+
+def month_end(today: date) -> date:
+    """First day of next month (the dollar budget resets then)."""
+    return (today.replace(day=1) + timedelta(days=32)).replace(day=1)
+
+
+def openai_budget(env: dict[str, str]) -> float:
+    return _env_float(env, "OPENAI_BUDGET_USD", 4.5)
+
+
+def big_tokens_per_question(tier: Tier) -> int:
+    return tier.forecasts * sum(O_FORECAST_TOKENS)
+
+
+def mini_tokens_per_question(tier: Tier) -> int:
+    return tier.forecasts * 2 * sum(O_PARSE_TOKENS)
+
+
+def openai_question_cost(env: dict[str, str]) -> float:
+    """Expected paid USD per question while the free tokens last: the research call (tool use, billed)."""
+    _, research, _ = openai_models(env)
+    pin, _, pout = openai_price(research, env)
+    searches = O_SEARCHES_PER_RESEARCH * _env_float(env, "OPENAI_WEB_SEARCH_COST", OPENAI_WEB_SEARCH_COST)
+    return O_RESEARCH_TOKENS[0] * pin + O_RESEARCH_TOKENS[1] * pout + searches
+
+
+def openai_overflow_cost(tier: Tier, env: dict[str, str]) -> float:
+    """Standard-rate USD of one question's forecast tokens (what it costs past the free allowance)."""
+    fid, _, pid = openai_models(env)
+    fin, _, fout = openai_price(fid, env)
+    qin, _, qout = openai_price(pid, env)
+    per = O_FORECAST_TOKENS[0] * fin + O_FORECAST_TOKENS[1] * fout + 2 * (O_PARSE_TOKENS[0] * qin + O_PARSE_TOKENS[1] * qout)
+    return tier.forecasts * per
+
+
+@dataclass
+class OpenAIPlan:
+    tiers: dict[str, Tier]  # tier per kind for every question that runs
+    free_left: int  # big-group tokens pacing may use today (allowance - used - margin)
+    reserved_later: int  # questions expected later today that pacing keeps tokens for
+    paid: list[int] = field(default_factory=list)  # indexes answered at minimum tier, paid from the dollar budget
+    deferred: list[int] = field(default_factory=list)  # indexes left for a later run (close > 30 h away)
+    reason: str = ""
+
+
+def openai_free_left(free: dict[str, tuple[int, int]] | None, env: dict[str, str], group: str = "big") -> int:
+    used, limit = (free or {}).get(group, (0, free_daily_limits(env)[group]))
+    return max(0, int(limit * (1 - free_margin(env))) - int(used))
+
+
+def openai_plan(questions: list[tuple[str, datetime | None]], free: dict[str, tuple[int, int]] | None,
+                now: datetime, env: dict[str, str], defer: bool = True) -> OpenAIPlan:
+    """questions: (kind, close time) in the order they will run (closing soonest first).
+    Richest tier whose projected big-group tokens (this run + questions expected later today) fit the
+    free allowance left. If not even the minimum fits: minimum tier, the first ones that still fit are free,
+    the rest that close within DEFER_IF_CLOSES_AFTER_H hours are paid, the others wait for another run."""
+    left = openai_free_left(free, env)
+    hours_left = 24 - (now.hour + now.minute / 60)
+    later = int(round(sum(questions_per_day(env, k) for k in KINDS) * hours_left / 24))
+    after_split = now.date() >= _date(env, "BUDGET_SPLIT_DATE", "2026-11-01")
+
+    def tiers_for(t: Tier) -> dict[str, Tier]:
+        return {"main": t, "minibench": TIERS[-1] if after_split else t}
+
+    def need(tiers: dict[str, Tier], extra: int) -> int:
+        per = [big_tokens_per_question(tiers[k]) for k, _ in questions]
+        return sum(per) + extra * big_tokens_per_question(tiers["main"])
+
+    for t in TIERS:
+        if need(tiers_for(t), later) <= left:
+            return OpenAIPlan(tiers_for(t), left, later, reason=f"{t.name} fits today's free tokens")
+    tiers = tiers_for(TIERS[-1])
+    plan = OpenAIPlan(tiers, left, 0)
+    budget_left = left
+    cutoff = now + timedelta(hours=_env_float(env, "OPENAI_DEFER_HOURS", DEFER_IF_CLOSES_AFTER_H))
+    for i, (kind, close) in enumerate(questions):
+        cost = big_tokens_per_question(tiers[kind])
+        if cost <= budget_left:
+            budget_left -= cost
+        elif not defer or close is None or close <= cutoff:
+            plan.paid.append(i)
+        else:
+            plan.deferred.append(i)
+    plan.reason = "free tokens short: minimum tier" + (
+        f", {len(plan.paid)} paid, {len(plan.deferred)} deferred" if plan.paid or plan.deferred else "")
+    return plan
+
+
+def openai_pacing(plan: OpenAIPlan, remaining_usd: float, today: date, env: dict[str, str],
+                  open_unforecasted: dict[str, int]) -> Pacing:
+    """Pacing record for the Summary: tier from the token plan; USD per question = month budget left
+    spread over the questions expected until the month ends; est_cost = expected paid USD per question."""
+    days_left = max(1, (month_end(today) - today).days)
+    n = {k: max(1, open_unforecasted.get(k, 0), round(days_left * questions_per_day(env, k))) for k in KINDS}
+    spendable = max(0.0, remaining_usd - openai_stop_below(env))
+    per_q = spendable / (n["main"] + n["minibench"])
+    est = openai_question_cost(env)
+    kinds = {k: KindPace(plan.tiers[k], per_q, est, n[k]) for k in KINDS}
+    daily = est * sum(questions_per_day(env, k) for k in KINDS)
+    run_out = today + timedelta(days=int(spendable / daily)) if daily > 0 else None
+    return Pacing(kinds, today >= _date(env, "BUDGET_SPLIT_DATE", "2026-11-01"), run_out)
+
+
+def openai_stop_below(env: dict[str, str]) -> float:
+    return _env_float(env, "OPENAI_BUDGET_STOP_BELOW", 0.25)
+
+
+def openai_lookup(env: dict[str, str], spent: float, free_used: dict[str, int], state_found: bool) -> KeyLookup:
+    """Stands in for the OpenRouter /key read: limit = monthly budget, usage = locally booked USD;
+    `free` = today's free tokens (used, allowance) per group."""
+    if not env.get("OPENAI_API_KEY"):
+        return KeyLookup(None, None, "openai")
+    total = openai_budget(env)
+    limits = free_daily_limits(env)
+    note = "" if state_found else (
+        "No saved usage record (.state/state.json) was found, so today's free tokens and this month's "
+        "spend start from 0 here; the real usage may be higher. Check the OpenAI usage dashboard.")
+    lk = KeyLookup(KeyInfo(limit=total, usage=spent, remaining=total - spent), 200, "openai", note)
+    lk.free = {g: (int(free_used.get(g, 0)), limits[g]) for g in ("big", "mini")}
+    return lk
+
+
+def openai_lookup_from_store(env: dict[str, str], store: Any, today: date | None = None) -> KeyLookup:
+    day = today or utc_today()
+    if store is None:
+        return openai_lookup(env, 0.0, {}, False)
+    return openai_lookup(env, store.openai_month_spent(month_key(day)), store.openai_free_used(day.isoformat()),
+                         bool(store.found))

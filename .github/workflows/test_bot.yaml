@@ -43,7 +43,7 @@ jobs:
         if: steps.venv-cache.outputs.cache-hit != 'true'
         run: poetry install --no-interaction --no-root --without dev
       # v0.2.0: the Anthropic spend record lives in .state (same cache as the tournament workflow)
-      - name: Restore saved state (Anthropic spend record)
+      - name: Restore saved state (Anthropic / OpenAI usage record)
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .state
@@ -57,6 +57,7 @@ jobs:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
           BOT_ENABLED: ${{ vars.BOT_ENABLED }}
@@ -82,6 +83,25 @@ jobs:
           ANTHROPIC_FALLBACKS: ${{ vars.ANTHROPIC_FALLBACKS }}
           ANTHROPIC_WEB_SEARCH_TOOL: ${{ vars.ANTHROPIC_WEB_SEARCH_TOOL }}
           ANTHROPIC_WEB_SEARCH_MAX_USES: ${{ vars.ANTHROPIC_WEB_SEARCH_MAX_USES }}
+          OPENAI_FORECAST_MODEL: ${{ vars.OPENAI_FORECAST_MODEL }}
+          OPENAI_RESEARCH_MODEL: ${{ vars.OPENAI_RESEARCH_MODEL }}
+          OPENAI_PARSE_MODEL: ${{ vars.OPENAI_PARSE_MODEL }}
+          OPENAI_FORECAST_PRICE: ${{ vars.OPENAI_FORECAST_PRICE }}
+          OPENAI_RESEARCH_PRICE: ${{ vars.OPENAI_RESEARCH_PRICE }}
+          OPENAI_PARSE_PRICE: ${{ vars.OPENAI_PARSE_PRICE }}
+          OPENAI_EFFORT: ${{ vars.OPENAI_EFFORT }}
+          OPENAI_RESEARCH_EFFORT: ${{ vars.OPENAI_RESEARCH_EFFORT }}
+          OPENAI_MAX_TOKENS: ${{ vars.OPENAI_MAX_TOKENS }}
+          OPENAI_BUDGET_USD: ${{ vars.OPENAI_BUDGET_USD }}
+          OPENAI_BUDGET_STOP_BELOW: ${{ vars.OPENAI_BUDGET_STOP_BELOW }}
+          OPENAI_FREE_DAILY_BIG: ${{ vars.OPENAI_FREE_DAILY_BIG }}
+          OPENAI_FREE_DAILY_MINI: ${{ vars.OPENAI_FREE_DAILY_MINI }}
+          OPENAI_FREE_MARGIN: ${{ vars.OPENAI_FREE_MARGIN }}
+          OPENAI_DEFER_HOURS: ${{ vars.OPENAI_DEFER_HOURS }}
+          OPENAI_WEB_SEARCH_MAX_CALLS: ${{ vars.OPENAI_WEB_SEARCH_MAX_CALLS }}
+          OPENAI_SEARCH_CONTEXT: ${{ vars.OPENAI_SEARCH_CONTEXT }}
+          OPENAI_WEB_SEARCH_COST: ${{ vars.OPENAI_WEB_SEARCH_COST }}
+          OPENAI_TOOL_TOKENS_FREE: ${{ vars.OPENAI_TOOL_TOKENS_FREE }}
       - name: Save state
         if: always() && hashFiles('.state/changed') != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0

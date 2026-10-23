@@ -29,7 +29,7 @@ from typing import Any, Callable
 import budget
 import state as state_mod
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 SWITCHES = ("BOT_ENABLED", "PUBLISH", "DRY_RUN_LLM")
 # Must equal forecasting_tools.MetaculusClient.CURRENT_AI_COMPETITION_ID /
 # CURRENT_MINIBENCH_ID (asserted in tests).
@@ -236,6 +236,8 @@ def pacing_lines(decision: budget.BudgetDecision, items: list[QItem], env: dict[
     paced until the next credit reset)."""
     if decision.remaining is None:
         return []
+    if budget.select_provider(env) == "openai":
+        return []  # v0.3.0: OpenAI pacing is in openai_precheck (token plan)
     models, cheap, prices = budget.provider_prices(env, None)
     open_new = {k: 0 for k in budget.KINDS}
     for it in items:
@@ -254,6 +256,44 @@ def pacing_lines(decision: budget.BudgetDecision, items: list[QItem], env: dict[
         f"- 配速（{split}）：" + "；".join(parts),
         f"- 預估額度見底日：{p.run_out.isoformat() if p.run_out else 'n/a'}",
     ]
+
+
+def openai_lines(free: dict[str, tuple[int, int]] | None, period: tuple[str, str], spent: float | None,
+                 total: float | None) -> list[str]:
+    """Today's free tokens per group and this month's paid spend (both booked locally)."""
+    out = []
+    if free:
+        parts = [f"{g} 已用 {u:,}／{lim:,}（剩 {max(0, lim - u):,}）" for g, (u, lim) in free.items()]
+        out.append("- OpenAI 今日免費 token（UTC 日，假設 00:00 UTC 重置，本機記帳）：" + "；".join(parts))
+    out.append(f"- OpenAI 本月付費（{period[0][:7]}，本機記帳）：{_money(spent)}／預算 {_money(total)}")
+    return out
+
+
+def _when(text: str | None) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def openai_precheck(lookup: budget.KeyLookup, new: list[QItem], env: dict[str, str],
+                    now: datetime) -> tuple[list[QItem], list[str]]:
+    """v0.3.0: today's free tokens, month spend, and the same token plan as main.py; questions it would
+    defer (free tokens used up, closing > 30 h away) are not work for this run."""
+    start = now.date().replace(day=1)
+    info = lookup.info
+    lines = openai_lines(lookup.free, (start.isoformat(), budget.month_end(now.date()).isoformat()),
+                         info.usage if info else None, budget.openai_budget(env))
+    todo = sorted(new, key=lambda it: (_when(it.close_time) or datetime.max.replace(tzinfo=timezone.utc)))
+    plan = budget.openai_plan([(budget.kind_of(it.tournament), _when(it.close_time)) for it in todo],
+                              lookup.free, now, env)
+    tiers = "、".join(f"{k} {t.name}（{t.forecasts} 次預測）" for k, t in plan.tiers.items())
+    lines.append(f"- 免費額度配速：{tiers}；{plan.reason}")
+    if plan.deferred:
+        lines += _block("WARNING", f"**今天的免費 token 用完，{len(plan.deferred)} 題延後**（截止還超過 30 小時，"
+                        "等 00:00 UTC 額度重置後再做）")
+    gone = set(plan.deferred)
+    return [it for i, it in enumerate(todo) if i not in gone], lines
 
 
 def render_listing(items: list[QItem]) -> list[str]:
@@ -364,7 +404,8 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
 
     provider = budget.select_provider(env)
     label = budget.provider_label(provider)
-    decision = budget.decide(budget.lookup_for(env, store, deps.get_json, deps.now().date()), env)
+    lookup = budget.lookup_for(env, store, deps.get_json, deps.now().date())
+    decision = budget.decide(lookup, env)
     fail_limit = state_mod.max_failed_runs(env)
     cooldown = state_mod.skip_cooldown_hours(env)
     # v0.1.2/3: questions that failed MAX_QUESTION_FAILED_RUNS runs in a row are not "work"
@@ -401,6 +442,10 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
                      f"{_money(budget.anthropic_budget(env) - decision.remaining)}／預算 "
                      f"{_money(budget.anthropic_budget(env))}")
     lines += pacing_lines(decision, items, env)
+    if provider == "openai" and decision.remaining is not None:
+        new, plan_lines = openai_precheck(lookup, new, env, deps.now())
+        lines += plan_lines
+        needs_llm = (publish and bool(new)) or (not publish and dry_llm)
     lines += _skipped_block(stuck, fail_limit, cooldown)
     work = needs_llm and not systemic
     if publish:

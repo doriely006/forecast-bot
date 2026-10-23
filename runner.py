@@ -90,6 +90,8 @@ _FATAL_PATTERNS = [
     (re.compile(r'"code"\s*:\s*(40[12])\b'), None),
     (re.compile(r"(?:status[_ ]?code|error code|HTTP)\D{0,3}(40[12])\b", re.I), None),
     (re.compile(r"requires more credits|insufficient credits|insufficient balance", re.I), 402),
+    # v0.3.0 OpenAI quota / spend-limit codes (in report.errors text)
+    (re.compile(r"insufficient_quota|spend_limit_exceeded|credit_balance_exhausted|usage_limit_exceeded"), 402),
 ]
 
 
@@ -175,6 +177,11 @@ class RunResult:
     usage_before: float | None = None
     usage_after: float | None = None
     remaining_after: float | None = None
+    free_before: dict[str, tuple[int, int]] | None = None  # v0.3.0 OpenAI: group -> (free tokens used today, allowance)
+    free_after: dict[str, tuple[int, int]] | None = None
+    deferred: list[dict[str, Any]] = field(default_factory=list)  # OpenAI: free tokens used up, closes > 30 h away
+    paid_overflow: int = 0  # OpenAI: questions answered past the free allowance (paid at standard rates)
+    plan_reason: str = ""
 
     def count(self, *statuses: str) -> int:
         return sum(o.status in statuses for o in self.outcomes)
@@ -261,6 +268,10 @@ async def run(
         start, horizon = budget.credit_period(day, budget.credit_reset_day(env))
         result.period = (start.isoformat(), horizon.isoformat())
         result.budget_total = budget.anthropic_budget(env)
+    elif provider == "openai":  # v0.3.0: dollars per calendar month, free tokens per UTC day
+        result.period = (day.replace(day=1).isoformat(), budget.month_end(day).isoformat())
+        result.budget_total = budget.openai_budget(env)
+        result.free_before = lookup.free
     result.usage_before = lookup.info.usage if lookup.info else None
     skip_forecasted = mode == "tournament"
 
@@ -293,15 +304,17 @@ async def run(
     to_forecast.sort(key=_close_key)  # closing soonest first
     if store is not None and mode == "tournament":
         to_forecast = _drop_failing(store, to_forecast, env, result, now)
-    if decision.remaining is not None:
-        open_new = {k: 0 for k in budget.KINDS}
-        for name, _ in to_forecast:
-            open_new[budget.kind_of(name)] += 1
+    open_new = {k: 0 for k in budget.KINDS}
+    for name, _ in to_forecast:
+        open_new[budget.kind_of(name)] += 1
+    if decision.remaining is not None and provider != "openai":
         result.pacing = budget.pace(decision.remaining, day, env, open_new, prices, horizon, provider)
     cap = max_forecasts_for(mode, publish, env)
     if cap is not None and len(to_forecast) > cap:
         result.not_attempted_cap = len(to_forecast) - cap
         to_forecast = to_forecast[:cap]
+    if decision.remaining is not None and provider == "openai":
+        to_forecast = _openai_plan(to_forecast, lookup, decision, day, env, result, mode, now, open_new)
     result.llm_needed = bool(to_forecast)
 
     if to_forecast and (not decision.may_call_llm or result.pacing is None):
@@ -333,7 +346,29 @@ async def run(
     if after is not None:
         result.usage_after = after.usage
         result.remaining_after = after.remaining
+    if provider == "openai":
+        result.free_after = key_lookup_fn().free if (decision.may_call_llm and to_forecast) else lookup.free
     return result
+
+
+def _openai_plan(to_forecast: list[tuple[str, Any]], lookup: budget.KeyLookup, decision: budget.BudgetDecision,
+                 day: date, env: dict[str, str], result: RunResult, mode: str, now: datetime | None,
+                 open_new: dict[str, int]) -> list[tuple[str, Any]]:
+    """v0.3.0: tier from today's free big-group tokens; with the allowance used up, questions closing
+    more than 30 h from now wait for a later run (tournament mode only), sooner ones run paid."""
+    clock = now or datetime.now(timezone.utc)
+    if clock.date() != day:
+        clock = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+    plan = budget.openai_plan([(budget.kind_of(n), q.close_time) for n, q in to_forecast], lookup.free, clock,
+                              env, defer=mode == "tournament")
+    result.pacing = budget.openai_pacing(plan, decision.remaining or 0.0, day, env, open_new)
+    result.plan_reason, result.paid_overflow = plan.reason, len(plan.paid)
+    gone = set(plan.deferred)
+    for i in plan.deferred:
+        n, q = to_forecast[i]
+        result.deferred.append({"id": _qkey(q), "title": q.question_text, "url": q.page_url,
+                                "close": _iso(q.close_time)})
+    return [item for i, item in enumerate(to_forecast) if i not in gone]
 
 
 def _qkey(q: Any) -> str:
@@ -569,6 +604,14 @@ def render_summary(r: RunResult, with_header: bool = True) -> str:
     if r.provider == "anthropic" and r.period:
         lines.append(f"- Anthropic 本期花費（{r.period[0]} 起，{r.period[1]} 重置，本機記帳）：{_money(r.usage_after)}"
                      f"／預算 {_money(r.budget_total)}；剩餘 {_money(r.remaining_after)}")
+    if r.provider == "openai" and r.period:
+        lines += precheck.openai_lines(r.free_after or r.free_before, r.period, r.usage_after, r.budget_total)
+        if r.plan_reason:
+            lines.append(f"- 免費額度配速：{r.plan_reason}" + (f"；超出免費額度、付費作答 {r.paid_overflow} 題" if r.paid_overflow else ""))
+        if r.deferred:
+            lines += _block("WARNING", f"**今天的免費 token 用完，{len(r.deferred)} 題延後**（截止還超過 30 小時，"
+                            "等 00:00 UTC 額度重置後的輪次再做）：" + "；".join(
+                                f"[{str(d['title'])[:50]}]({d['url']})（截止 {d['close']}）" for d in r.deferred[:10]))
     lines.append(f"- {r.label()}：{r.decision.state}（{r.decision.reason}）")
     if r.pacing:
         parts = [f"{k} {_money(v.per_question_budget)}／題 -> {v.tier.name}" for k, v in r.pacing.kinds.items()]

@@ -50,7 +50,7 @@ import guards  # noqa: E402
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 # Model choice (explicit candidate lists, per-tournament config) lives in
 # budget.py so the light precheck step can use it without dependencies.
@@ -343,6 +343,204 @@ def make_spend_recorder(ledger: Any, env: dict[str, str]) -> Any:
         ledger.add_spend(start.isoformat(), usd)
 
     return record
+
+
+# ------------------------------------------------------------ OpenAI (v0.3.0)
+# Direct OpenAI Responses API with the official `openai` SDK (already a dependency),
+# not litellm. reasoning.effort is always sent (gpt-5.4 / -mini default to none);
+# never sent: temperature/top_p. Research = web_search tool, billed (tool use is
+# excluded from the free daily tokens). Every call is booked by make_openai_recorder.
+
+OPENAI_FATAL_CODES = {"insufficient_quota", "credit_balance_exhausted", "organization_spend_limit_exceeded",
+                      "project_spend_limit_exceeded", "organization_usage_limit_exceeded", "billing_hard_limit_reached"}
+_OPENAI_FATAL_TEXT = re.compile(r"exceeded your current quota|spend limit|credit balance|billing", re.I)
+
+
+class OpenAIQuotaError(Exception):
+    """Quota / credit / spend limit used up. status_code 402 -> runner's run-wide stop (no retry, not counted)."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.status_code = 402
+
+
+def openai_fatal(e: BaseException) -> BaseException | None:
+    """402, or any error whose code/type is a quota or spend-limit code (429 insufficient_quota,
+    *_spend_limit_exceeded, credit_balance_exhausted ...) -> OpenAIQuotaError. 401 needs no mapping:
+    the SDK's AuthenticationError carries status_code 401."""
+    import openai
+
+    if isinstance(e, openai.APIStatusError):
+        codes = {str(getattr(e, "code", "") or ""), str(getattr(e, "type", "") or "")}
+        msg = str(getattr(e, "message", "") or e)
+        if e.status_code == 402 or codes & OPENAI_FATAL_CODES or (e.status_code == 429 and _OPENAI_FATAL_TEXT.search(msg)):
+            return OpenAIQuotaError(f"OpenAI quota/spend limit reached (HTTP {e.status_code}, "
+                                    f"{(codes & OPENAI_FATAL_CODES or {'billing'}).pop()}): {msg[:200]}")
+    return None
+
+
+def _openai_no_retry_types() -> tuple[type[BaseException], ...]:
+    import openai
+
+    return (OpenAIQuotaError, openai.AuthenticationError, openai.PermissionDeniedError,
+            openai.BadRequestError, openai.NotFoundError)
+
+
+def _dump(obj: Any) -> dict[str, Any]:
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return obj
+    return obj.model_dump() if hasattr(obj, "model_dump") else dict(vars(obj))
+
+
+def _web_search_calls(output: list[Any]) -> int:
+    """Billed search calls in one response: web_search_call items whose action is a search
+    (open_page / find_in_page are not billed as searches)."""
+    n = 0
+    for item in output or []:
+        if getattr(item, "type", None) == "web_search_call":
+            action = getattr(item, "action", None)
+            kind = getattr(action, "type", None) if action is not None else None
+            n += 1 if kind in (None, "search") else 0
+    return n
+
+
+class OpenAILlm(GeneralLlm):
+    """GeneralLlm look-alike whose direct call goes to the OpenAI Responses API."""
+
+    def __init__(self, model: str, client: Any, env: dict[str, str], record: Any, *, effort: str,
+                 max_tokens: int, web_search: bool = False, allowed_tries: int = 2,
+                 retry_wait_s: float = 5.0) -> None:
+        super().__init__(model=model, temperature=None, timeout=600, allowed_tries=allowed_tries)
+        self.client, self.env, self.record = client, env, record
+        self.effort, self.max_tokens, self.retry_wait_s = effort, max_tokens, retry_wait_s
+        self.web_search = web_search
+
+    def request_params(self, prompt: Any) -> dict[str, Any]:
+        system, messages = _to_anthropic_messages(prompt)  # same {role, content} shape
+        params: dict[str, Any] = {
+            "model": self.model,
+            "input": messages,
+            "max_output_tokens": self.max_tokens,
+            "reasoning": {"effort": self.effort},
+        }
+        if system:
+            params["instructions"] = system
+        if self.web_search:
+            params["tools"] = [{"type": "web_search",
+                                "search_context_size": self.env.get("OPENAI_SEARCH_CONTEXT") or "low"}]
+            params["max_tool_calls"] = int(self.env.get("OPENAI_WEB_SEARCH_MAX_CALLS") or 3)
+        return params
+
+    async def _invoke_with_request_cost_time_and_token_limits_and_retry(self, prompt: Any) -> Any:
+        for attempt in range(max(1, self.allowed_tries)):
+            try:
+                return await self._mockable_direct_call_to_model(prompt)
+            except _openai_no_retry_types():
+                raise
+            except Exception:
+                if attempt + 1 >= max(1, self.allowed_tries):
+                    raise
+                await asyncio.sleep(self.retry_wait_s * (attempt + 1))
+
+    async def _mockable_direct_call_to_model(self, prompt: Any) -> Any:
+        import openai
+        from forecasting_tools.ai_models.ai_utils.response_types import TextTokenCostResponse
+        from forecasting_tools.ai_models.resource_managers.monetary_cost_manager import MonetaryCostManager
+
+        try:
+            resp = await self.client.responses.create(**self.request_params(prompt))
+        except openai.APIStatusError as e:
+            fatal = openai_fatal(e)
+            if fatal is not None:
+                raise fatal from e
+            raise
+        usage = _dump(getattr(resp, "usage", None))
+        searches = _web_search_calls(getattr(resp, "output", None) or [])
+        cost = self.record(self.model, usage, searches, self.web_search)  # every call is booked
+        MonetaryCostManager.increase_current_usage_in_parent_managers(cost)
+        texts: list[str] = []
+        urls: list[str] = []
+        for item in getattr(resp, "output", None) or []:
+            if getattr(item, "type", None) != "message":
+                continue
+            for part in getattr(item, "content", None) or []:
+                if getattr(part, "type", None) == "output_text":
+                    texts.append(part.text)
+                    for a in getattr(part, "annotations", None) or []:
+                        url = getattr(a, "url", None)
+                        if getattr(a, "type", None) == "url_citation" and url and url not in urls:
+                            urls.append(url)
+                elif getattr(part, "type", None) == "refusal":
+                    raise RuntimeError(f"{self.model} refused: {str(getattr(part, 'refusal', ''))[:200]}")
+        answer = "".join(texts).strip()
+        status = getattr(resp, "status", None)
+        reason = getattr(getattr(resp, "incomplete_details", None), "reason", None)
+        if not answer:
+            raise RuntimeError(f"{self.model} returned no text (status {status}, {reason or 'no reason'})")
+        if status == "incomplete":
+            logger.warning(f"{self.model} response incomplete ({reason}); the answer may be cut off")
+        if urls:
+            answer += "\n\nSources:\n" + "\n".join(f"- {u}" for u in urls[:20])
+        tin, tout = int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0)
+        return TextTokenCostResponse(data=answer, prompt_tokens_used=tin, completion_tokens_used=tout,
+                                     total_tokens_used=tin + tout, model=self.model, cost=cost)
+
+
+def build_openai_llms(forecast_id: str, parse_id: str, client: Any, env: dict[str, str], record: Any,
+                      research_id: str | None = None, **kw: Any) -> dict[str, Any]:
+    """Forecasts on `forecast_id` (OPENAI_EFFORT, default medium); research on the research model with
+    web search (OPENAI_RESEARCH_EFFORT, default low); summary and parsing on `parse_id` at low effort."""
+    import budget
+
+    research_id = research_id or budget.openai_models(env)[1]
+
+    def llm(model: str, effort: str, tokens: int, web: bool = False) -> OpenAILlm:
+        return OpenAILlm(model, client, env, record, effort=effort, max_tokens=tokens, web_search=web, **kw)
+
+    return {
+        "default": llm(forecast_id, env.get("OPENAI_EFFORT") or "medium", int(env.get("OPENAI_MAX_TOKENS") or 16000)),
+        "researcher": llm(research_id, env.get("OPENAI_RESEARCH_EFFORT") or "low", 12000, web=True),
+        "summarizer": llm(parse_id, "low", 4000),
+        "parser": llm(parse_id, "low", 4000),
+    }
+
+
+def make_openai_recorder(ledger: Any, env: dict[str, str]) -> Any:
+    """Books each OpenAI call: free-group tokens for today (UTC) and paid USD for this month; returns the USD."""
+    import budget
+
+    def record(model: str, usage: dict[str, Any], web_searches: int = 0, used_tool: bool = False) -> float:
+        today = budget.utc_today()
+        group, tokens, usd = budget.openai_call_charge(
+            usage, model, env, ledger.openai_free_used(today.isoformat()), web_searches, used_tool)
+        ledger.add_openai(today.isoformat(), budget.month_key(today), group, tokens, usd)
+        return usd
+
+    return record
+
+
+def make_openai_probe(parse_id: str, client: Any, record: Any) -> Any:
+    """v0.1.4 health probe on OpenAI: one tiny call, no SDK retry; any 200 means the upstream is up."""
+
+    async def probe() -> None:
+        import openai
+        import runner
+
+        c = client.with_options(max_retries=0, timeout=runner.PROBE_TIMEOUT_S) if hasattr(client, "with_options") else client
+        try:
+            resp = await c.responses.create(model=parse_id, max_output_tokens=16, reasoning={"effort": "low"},
+                                            input='Reply with the single word "ok".')
+        except openai.APIStatusError as e:
+            fatal = openai_fatal(e)
+            if fatal is not None:
+                raise fatal from e
+            raise
+        record(parse_id, _dump(getattr(resp, "usage", None)), 0, False)
+
+    return probe
+
 
 def _to_anthropic_messages(prompt: Any) -> tuple[str, list[dict[str, Any]]]:
     """str -> one user message; a list of {role, content} dicts (GeneralLlm's shape) -> system text + the rest."""
@@ -868,6 +1066,16 @@ def cli(argv: list[str] | None = None) -> int:
             llms_for = lambda kind: build_anthropic_llms(forecast_ids[kind], cheap_id, aclient, env, record)  # noqa: E731
             key_lookup_fn = lambda: budget.anthropic_lookup_from_store(env, ledger)  # noqa: E731
             probe_fn = make_anthropic_probe(cheap_id, aclient, record, env)
+        elif provider == "openai":  # v0.3.0
+            import openai
+
+            forecast_ids, cheap_id, prices = budget.provider_prices(env)
+            ledger = store if store is not None else state.PendingComments.load(state.state_dir(env))
+            orecord = make_openai_recorder(ledger, env)
+            oclient = openai.AsyncOpenAI(max_retries=2, timeout=600)
+            llms_for = lambda kind: build_openai_llms(forecast_ids[kind], cheap_id, oclient, env, orecord)  # noqa: E731
+            key_lookup_fn = lambda: budget.openai_lookup_from_store(env, ledger)  # noqa: E731
+            probe_fn = make_openai_probe(cheap_id, oclient, orecord)
         else:
             models = budget.fetch_models()
             forecast_ids, cheap_id, prices = budget.provider_prices(env, models)

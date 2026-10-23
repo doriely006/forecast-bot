@@ -64,6 +64,26 @@ jobs:
       ANTHROPIC_FALLBACKS: ${{ vars.ANTHROPIC_FALLBACKS }}
       ANTHROPIC_WEB_SEARCH_TOOL: ${{ vars.ANTHROPIC_WEB_SEARCH_TOOL }}
       ANTHROPIC_WEB_SEARCH_MAX_USES: ${{ vars.ANTHROPIC_WEB_SEARCH_MAX_USES }}
+      # v0.3.0: OpenAI API path (no OpenRouter/Anthropic key, or LLM_PROVIDER=openai)
+      OPENAI_FORECAST_MODEL: ${{ vars.OPENAI_FORECAST_MODEL }}
+      OPENAI_RESEARCH_MODEL: ${{ vars.OPENAI_RESEARCH_MODEL }}
+      OPENAI_PARSE_MODEL: ${{ vars.OPENAI_PARSE_MODEL }}
+      OPENAI_FORECAST_PRICE: ${{ vars.OPENAI_FORECAST_PRICE }}
+      OPENAI_RESEARCH_PRICE: ${{ vars.OPENAI_RESEARCH_PRICE }}
+      OPENAI_PARSE_PRICE: ${{ vars.OPENAI_PARSE_PRICE }}
+      OPENAI_EFFORT: ${{ vars.OPENAI_EFFORT }}
+      OPENAI_RESEARCH_EFFORT: ${{ vars.OPENAI_RESEARCH_EFFORT }}
+      OPENAI_MAX_TOKENS: ${{ vars.OPENAI_MAX_TOKENS }}
+      OPENAI_BUDGET_USD: ${{ vars.OPENAI_BUDGET_USD }}
+      OPENAI_BUDGET_STOP_BELOW: ${{ vars.OPENAI_BUDGET_STOP_BELOW }}
+      OPENAI_FREE_DAILY_BIG: ${{ vars.OPENAI_FREE_DAILY_BIG }}
+      OPENAI_FREE_DAILY_MINI: ${{ vars.OPENAI_FREE_DAILY_MINI }}
+      OPENAI_FREE_MARGIN: ${{ vars.OPENAI_FREE_MARGIN }}
+      OPENAI_DEFER_HOURS: ${{ vars.OPENAI_DEFER_HOURS }}
+      OPENAI_WEB_SEARCH_MAX_CALLS: ${{ vars.OPENAI_WEB_SEARCH_MAX_CALLS }}
+      OPENAI_SEARCH_CONTEXT: ${{ vars.OPENAI_SEARCH_CONTEXT }}
+      OPENAI_WEB_SEARCH_COST: ${{ vars.OPENAI_WEB_SEARCH_COST }}
+      OPENAI_TOOL_TOKENS_FREE: ${{ vars.OPENAI_TOOL_TOKENS_FREE }}
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -83,6 +103,7 @@ jobs:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           REPO_PRIVATE: ${{ github.event.repository.private }}
       - name: Standings (once a day)
@@ -121,6 +142,7 @@ jobs:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
           SUMMARY_HEADER_DONE: "1"
