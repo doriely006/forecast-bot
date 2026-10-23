@@ -50,6 +50,7 @@ jobs:
       BOT_USERNAME: ${{ vars.BOT_USERNAME }}
       MAX_QUESTION_FAILED_RUNS: ${{ vars.MAX_QUESTION_FAILED_RUNS }}
       SKIP_COOLDOWN_HOURS: ${{ vars.SKIP_COOLDOWN_HOURS }}
+      MIN_MINUTES_BEFORE_CLOSE: ${{ vars.MIN_MINUTES_BEFORE_CLOSE }}
       # v0.2.0: Anthropic API path (used when there is no OpenRouter key, or LLM_PROVIDER=anthropic)
       LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
       ANTHROPIC_FORECAST_MODEL: ${{ vars.ANTHROPIC_FORECAST_MODEL }}

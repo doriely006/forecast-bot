@@ -639,3 +639,56 @@ def test_probe_cost_is_in_the_spend_estimate(fake_llm, tmp_path):
     assert r.probe_cost == pytest.approx(2 * (MINI[0] * 30 + MINI[1] * 16)) and r.probe_cost > 0
     r.usage_before = r.usage_after = None
     assert r.spend == pytest.approx(r.probe_cost)  # no key info: failed questions cost 0, the probe still counts
+
+
+# ---- v0.3.1: closing-soon skip, closed-on-post classification
+class ClosedClient(FakeClient):
+    """Every forecast post answers like Metaculus does for a question that closed meanwhile."""
+
+    def post_binary_question_prediction(self, qid, p):
+        raise RuntimeError('HTTP 405 {"error":"Question 46412 is already closed to forecasting !"}')
+
+
+def _one_binary(close):
+    q = load_fixture_questions()["MiniBench"][2]
+    q.question_text = "Fixture question that closes"  # the original text makes the fake LLM fail
+    q.close_time = close
+    return q
+
+
+def test_question_closing_within_ten_minutes_gets_no_llm_call_and_is_not_systemic(fake_llm):
+    q = _one_binary(datetime(2026, 10, 16, 0, 9, tzinfo=timezone.utc))  # do_run pins today=10-16 -> clock 00:00
+    r = do_run(FakeClient({"FutureEval Fall 2026": [], "MiniBench": [q]}), publish=True)
+    assert [o.status for o in r.outcomes] == ["skipped_closing"] and not fake_llm.calls
+    assert r.systemic == [] and r.exit_code == 0 and r.failed == 0 and not r.llm_needed
+    assert "臨截止跳過（不花 LLM）：1" in runner.render_summary(r)
+
+
+def test_closing_threshold_is_configurable_and_no_close_time_is_unaffected(fake_llm):
+    q = _one_binary(datetime(2026, 10, 16, 0, 30, tzinfo=timezone.utc))
+    c = lambda: FakeClient({"FutureEval Fall 2026": [], "MiniBench": [q.model_copy(deep=True)]})
+    assert do_run(c(), publish=False, env={"MIN_MINUTES_BEFORE_CLOSE": "45"}).count("skipped_closing") == 1
+    assert do_run(c(), publish=False, env={"MIN_MINUTES_BEFORE_CLOSE": "10"}).count("skipped_closing") == 0
+    assert do_run(c(), publish=False, env={"MIN_MINUTES_BEFORE_CLOSE": "x"}).count("skipped_closing") == 0
+    q.close_time = None
+    r = do_run(c(), publish=True, env={"MIN_MINUTES_BEFORE_CLOSE": "45"})
+    assert r.count("skipped_closing") == 0 and r.count("submitted") == 1
+
+
+def test_closed_on_post_is_its_own_status_not_failed_not_counted_not_red(fake_llm, tmp_path):
+    q = _one_binary(datetime(2026, 11, 1, tzinfo=timezone.utc))
+    client = ClosedClient({"FutureEval Fall 2026": [], "MiniBench": [q]})
+    store = state.PendingComments.load(tmp_path)
+    r = do_run(client, publish=True, store=store, concurrency=1)
+    (o,) = r.outcomes
+    assert o.status == "closed" and r.failed == 0 and r.count("closed") == 1
+    assert r.systemic == [] and r.exit_code == 0
+    again = state.PendingComments.load(tmp_path)
+    assert again.failed_runs("2203") == 0 and not again.items  # no skip counter, no pending comment
+    assert "作答期間已截止（沒送出）：1" in runner.render_summary(r)
+
+
+def test_is_closed_error_detection():
+    assert runner.is_closed_error(RuntimeError('{"error":"Question 1 is already closed to forecasting !"}'))
+    assert runner.is_closed_error(RuntimeError("HTTP 405 Method Not Allowed"))
+    assert not runner.is_closed_error(RuntimeError("HTTP 500 server error"))

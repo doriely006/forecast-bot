@@ -2,6 +2,16 @@
 
 ## 收工日誌
 
+### 2026-10-24 v0.3.1 臨截止跳過＋closed 分類（首輪 live run 39991270934）
+- 病：FutureEval 題只開 ~1.5h，研究完已截止，post 回 405 "already closed to forecasting" -> 3 posts x 庫內 3 次 backoff ~6 分鐘、outcome=failed、唯一 attempted -> systemic -> exit 1（紅 job＋寄信）。
+- `runner.run`：fetch 迴圈內 `clock < close_time <= clock+MIN_MINUTES_BEFORE_CLOSE`（預設 10，非數字／<0 回 10）-> `Outcome skipped_closing`，不進 to_forecast（不吃 cap／配速／openai plan／store）；`result.outcomes += closing` 在 after-lookup 前。clock＝`now` 或真時鐘，日期 != `today` 時用 today 的 00:00 UTC（同 openai plan 規則）。已過期（close<=clock）的不擋——API 只回 open，且舊測試 fixture 103 刻意用過去時間。
+- `publish_one`：post 例外 `is_closed_error`（status 405／文字含 "closed to forecasting"／字面 405）-> `store.remove`、立刻 return `Outcome closed`，不再跑外層 3 輪。`_count_failure` 走 else -> `rollback`（不進 MAX_QUESTION_FAILED_RUNS）。
+- `NOT_ATTEMPTED` 常數（skipped_budget／stopped／skipped_closing／closed）給 `systemic` 與 `_upstream_suspect`。Summary 新行「臨截止跳過（不花 LLM）／作答期間已截止（沒送出）」。
+- workflow：兩支 yaml 加 `MIN_MINUTES_BEFORE_CLOSE: vars.…`（tournament 放 job env）；README 變數表加一列；版號 pyproject／main／precheck／test。
+- 測試 171 passed（舊 167＋4：臨截止跳過且 systemic 空、閾值可調＋無 close_time 不受影響、post 405 -> closed 不計數不紅、is_closed_error）。
+- 沒做：庫內 `retry_with_exponential_backoff` 對 405 的重試（decorator 在 metaculus_client `_post_question_prediction`，要 monkeypatch 內部；每次 post 仍白等 ~2 分鐘）。post 前預檢 close_time 已過也沒做（scheduled_close_time 可能不等於實際）。
+- 已知：precheck 仍把「只剩臨截止題」算有工作（job 會起、不花 LLM、log 短）；closed 題下輪若仍 open 會再試一次。
+
 ### 2026-10-24 v0.3.0 OpenAI 直連路徑（data-sharing 免費日額度）
 - 選路：`LLM_PROVIDER` 收 openai；未設時 OPENROUTER_API_KEY > ANTHROPIC_API_KEY > OPENAI_API_KEY。`provider_label`／`decide` key 名／`lookup_for`／`pacing_horizon`（月底）／`provider_prices`（cheap＝parse model）都加 openai 分支。
 - SDK：用已在依賴裡的官方 `openai` 2.13.0（poetry.lock 不動），Responses API。main.py `OpenAILlm(GeneralLlm)` 照 AnthropicLlm 模式：自己 retry（quota／401／403／400／404 不重試）、`reasoning.effort` 一律送（gpt-5.4 系預設 none）、不送 temperature/top_p。research＝`web_search` tool、`search_context_size` low、`max_tool_calls` 3；url_citation 附在研究尾；`status=="incomplete"` 只 log；refusal content part -> 普通失敗。

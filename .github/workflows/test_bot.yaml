@@ -63,6 +63,7 @@ jobs:
           BOT_ENABLED: ${{ vars.BOT_ENABLED }}
           PUBLISH: ${{ vars.PUBLISH }}
           TEST_MAX_QUESTIONS: ${{ vars.TEST_MAX_QUESTIONS }}
+          MIN_MINUTES_BEFORE_CLOSE: ${{ vars.MIN_MINUTES_BEFORE_CLOSE }}
           MAIN_FORECAST_MODEL: ${{ vars.MAIN_FORECAST_MODEL }}
           ASSUMED_BUDGET_USD: ${{ vars.ASSUMED_BUDGET_USD }}
           BUDGET_STOP_BELOW: ${{ vars.BUDGET_STOP_BELOW }}

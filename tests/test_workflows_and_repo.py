@@ -68,7 +68,7 @@ def _run_env(name):
 
 def test_stop_loss_variables_reach_both_steps():  # v0.1.3
     job = load("tournament.yaml")["jobs"]["forecast_job"]
-    for k in ("MAX_QUESTION_FAILED_RUNS", "SKIP_COOLDOWN_HOURS"):
+    for k in ("MAX_QUESTION_FAILED_RUNS", "SKIP_COOLDOWN_HOURS", "MIN_MINUTES_BEFORE_CLOSE"):
         assert job["env"][k] == "${{ vars.%s }}" % k  # job-level: the Quick check step and Run bot both see it
 
 
@@ -86,7 +86,7 @@ def test_version_matches_pyproject():
 
     py = (ROOT / "pyproject.toml").read_text()
     version = re.search(r'^version = "([^"]+)"', py, re.M).group(1)
-    assert version == main.VERSION == precheck.VERSION == "0.3.0"
+    assert version == main.VERSION == precheck.VERSION == "0.3.1"
 
 
 def test_workflows_locked_down():  # B6, B10, override 3

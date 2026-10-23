@@ -11,7 +11,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
 import budget
@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 PER_QUESTION_RETRIES = 2  # extra attempts within one run; across runs only state.py's failure count (stop-loss)
 PUBLISH_ATTEMPTS = 3
+DEFAULT_MIN_MINUTES_BEFORE_CLOSE = 10
+# outcomes that are neither a success nor this bot's failure: never systemic, never counted per question
+NOT_ATTEMPTED = ("skipped_budget", "stopped", "skipped_closing", "closed")
 COMMENT_ATTEMPTS = 3
 MAX_QUESTIONS_TO_FETCH = 2000
 PROBE_TIMEOUT_S = 30  # v0.1.4 health probe: one tiny cheap-model call, at most PROBE_ATTEMPTS HTTP calls per run
@@ -140,6 +143,7 @@ class Outcome:
     title: str
     url: str
     status: str  # submitted | comment_failed | dry_run | failed | skipped_budget | stopped
+    #   | skipped_closing (v0.3.1: closes within MIN_MINUTES_BEFORE_CLOSE, no LLM call) | closed (v0.3.1: closed while forecasting)
     detail: str = ""
     cost: float = 0.0
     fatal: bool = False  # run-wide 401/402 (or Anthropic credit exhausted): not this question's fault, never counted
@@ -216,7 +220,7 @@ class RunResult:
             out.append(f"{self.label()}: {self.decision.reason}")
         if self.fetch_auth_error or (self.fetch_errors and not self.open_counts):
             out.append("could not load questions: " + "; ".join(self.fetch_errors))
-        attempted = [o for o in self.outcomes if o.status not in ("skipped_budget", "stopped")]
+        attempted = [o for o in self.outcomes if o.status not in NOT_ATTEMPTED]
         if attempted and all(o.status == "failed" for o in attempted):
             out.append(f"every attempted question failed ({len(attempted)})")
         published = [o for o in self.outcomes if o.status in ("submitted", "comment_failed")]
@@ -231,6 +235,22 @@ class RunResult:
 
 def _iso(d: datetime | None) -> str:
     return d.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M") if d else "-"
+
+
+def min_minutes_before_close(env: dict[str, str]) -> int:
+    """MIN_MINUTES_BEFORE_CLOSE; unset, empty, not a number or < 0 -> 10. 0 only skips already-closed ones."""
+    try:
+        value = int(str(env.get("MIN_MINUTES_BEFORE_CLOSE", "")).strip())
+    except ValueError:
+        return DEFAULT_MIN_MINUTES_BEFORE_CLOSE
+    return value if value >= 0 else DEFAULT_MIN_MINUTES_BEFORE_CLOSE
+
+
+def is_closed_error(err: Any) -> bool:
+    """The post was refused because the question closed meanwhile (HTTP 405 / 'closed to forecasting')."""
+    text = str(err)
+    code = getattr(getattr(err, "response", None), "status_code", None)
+    return code == 405 or "closed to forecasting" in text.lower() or bool(re.search(r"\b405\b", text))
 
 
 def _close_key(item: tuple[str, Any]) -> float:
@@ -274,6 +294,11 @@ async def run(
         result.free_before = lookup.free
     result.usage_before = lookup.info.usage if lookup.info else None
     skip_forecasted = mode == "tournament"
+    clock = now or datetime.now(timezone.utc)  # same day rule as the OpenAI plan: a pinned `today` wins
+    if clock.date() != day:
+        clock = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+    closing_cutoff = clock + timedelta(minutes=min_minutes_before_close(env))
+    closing: list[Outcome] = []
 
     to_forecast: list[tuple[str, Any]] = []
     seen: set[Any] = set()
@@ -298,6 +323,9 @@ async def run(
                 result.already_forecasted += 1
             elif not is_supported(q):
                 result.unsupported += 1
+            elif q.close_time is not None and clock < q.close_time <= closing_cutoff:  # v0.3.1: no LLM money on it
+                closing.append(Outcome(name, q.question_text[:80], q.page_url, "skipped_closing",
+                                       f"close {_iso(q.close_time)}"))
             else:
                 to_forecast.append((name, q))
 
@@ -342,6 +370,7 @@ async def run(
         if probe_fn is not None and _upstream_suspect(result.outcomes):
             await _health_probe(probe_fn, result, prices[budget.KINDS[0]][1], store, stop)
 
+    result.outcomes += closing
     after = key_lookup_fn().info if (decision.may_call_llm and to_forecast) else lookup.info
     if after is not None:
         result.usage_after = after.usage
@@ -406,7 +435,7 @@ async def _health_probe(probe_fn: Callable[[], Awaitable[Any]], result: RunResul
 
 def _upstream_suspect(outcomes: list[Outcome]) -> bool:
     """>=2 questions really attempted and every one failed without a 401/402: only a reason to run the health probe."""
-    attempted = [o for o in outcomes if o.status not in ("skipped_budget", "stopped")]
+    attempted = [o for o in outcomes if o.status not in NOT_ATTEMPTED]
     return len(attempted) >= 2 and all(o.status == "failed" and not o.fatal for o in attempted)
 
 
@@ -443,7 +472,7 @@ def _count_failure(store: Any, tournament: str, q: Any, outcome: Outcome, now: d
         store.finish_failure(key, outcome.detail.split(" | ")[-1], now)
     elif outcome.status in ("submitted", "comment_failed", "dry_run"):
         store.clear_failure(key)
-    else:  # fatal failed, stopped, skipped_budget
+    else:  # fatal failed, stopped, skipped_budget, closed (v0.3.1)
         store.rollback(key)
 
 
@@ -525,6 +554,10 @@ async def publish_one(report: Any, client: Any, tournament: str, store: Any, cos
         except Exception as e:
             errors.append(f"forecast {attempt + 1}: {e.__class__.__name__}: {str(e)[:150]}")
             logger.warning(f"Publishing forecast failed for {url}: {errors[-1]}")
+            if is_closed_error(e):  # v0.3.1: retrying a closed question cannot work
+                if store is not None:
+                    store.remove(post_id)
+                return Outcome(tournament, title, url, "closed", " | ".join(errors), cost)
     else:
         if store is not None:
             store.remove(post_id)
@@ -624,6 +657,7 @@ def render_summary(r: RunResult, with_header: bool = True) -> str:
         f"- 這輪新交：{r.new_ok}" + ("" if r.publish else "（dry run，沒送）"),
         f"- 失敗：{r.failed}",
         f"- 說明沒送出：{comment_failed}",
+        f"- 臨截止跳過（不花 LLM）：{r.count('skipped_closing')}；作答期間已截止（沒送出）：{r.count('closed')}",
         f"- 預算不足跳過：{r.count('skipped_budget')}；{r.label()} 停止後沒做：{r.count('stopped')}",
     ]
     if r.not_attempted_cap:
