@@ -2,6 +2,13 @@
 
 ## 收工日誌
 
+### 週檢 2026-10-25
+- 「Forecast on tournament questions」10-18 起：success 11／failure 1／skipped 33（precheck 無工作）。唯一 failure＝39991270934（10-23 首輪 live，405 already closed，v0.3.1 已修），之後全綠。
+- 本週新交 4（40108814448:2、40133156079:1、40150278803:1）；失敗 0（v0.3.1 後）；臨截止跳過 0；預算不足跳過 0。
+- 最近成功 run 40150278803：OpenAI 本月付費 $0.41／$4.50（本機記帳）、剩餘 $4.09、配速 lean（main／minibench 各 $0.07／題）、預估見底 2026-11-04。
+- 無停損、無 fatal。
+- 判斷：沒事。花費尚未對 OpenAI 帳單校準（本機記帳已知高估），推播請 user 截 Usage 頁。
+
 ### 2026-10-24 v0.3.1 臨截止跳過＋closed 分類（首輪 live run 39991270934）
 - 病：FutureEval 題只開 ~1.5h，研究完已截止，post 回 405 "already closed to forecasting" -> 3 posts x 庫內 3 次 backoff ~6 分鐘、outcome=failed、唯一 attempted -> systemic -> exit 1（紅 job＋寄信）。
 - `runner.run`：fetch 迴圈內 `clock < close_time <= clock+MIN_MINUTES_BEFORE_CLOSE`（預設 10，非數字／<0 回 10）-> `Outcome skipped_closing`，不進 to_forecast（不吃 cap／配速／openai plan／store）；`result.outcomes += closing` 在 after-lookup 前。clock＝`now` 或真時鐘，日期 != `today` 時用 today 的 00:00 UTC（同 openai plan 規則）。已過期（close<=clock）的不擋——API 只回 open，且舊測試 fixture 103 刻意用過去時間。
