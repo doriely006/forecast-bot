@@ -3,6 +3,7 @@
 ## 收工日誌
 
 ### 2026-10-27 v0.4.1 MiniBench 備援：Anthropic 用不了就改 OpenAI（同一輪）
+- 真跑 run 40355520725（暫把 FROM 設 10-26，跑完改回 11-01）：split 路徑起得來（minibench anthropic／main openai、配速 minimum），但 MiniBench 0 開放題＝備援路徑沒被真打到，仍未驗。
 - user 10-26 裁定：MiniBench 不准停。觸發＝`runner.unusable(r)`：有 `stopped`／`skipped_budget` outcome，或 fatal failed，或 probe fatal（連 non-fatal failed 也搬）。一般單題失敗不觸發（照計數）。
 - `Group.fallback`（lazy callable）：main.py 對 provider≠全域的組掛 `make_group(kind, 全域, solo=False)`＝不帶 `_PACE_KINDS`，配速同 11-01 前 OpenAI 兼兩賽事（含 C6 minimum）；同一 store＝OpenAI 免費 token／月付費同一本帳。
 - `run()` 新 kwarg（預設關＝v0.4.0）：`only_urls`（備援只做被搬的題，抓題後過濾）、`serial_first`（有 fallback 的組第一題單跑 -> 死 provider 一輪只吃 1 個失敗請求；SDK 內建 429 重試仍可能多打，見沒驗）。
