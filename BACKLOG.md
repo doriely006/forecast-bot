@@ -106,7 +106,7 @@
 - SDK 實讀：`publish_report_to_metaculus` 先 POST forecast 再 POST `/comments/create/`（`is_private=True`）；explanation 必須以 `#` 開頭；`get_all_open_questions_from_tournament` 只抓第一頁 100 題。
 
 ### 下一輪開工先做
-- v0.3.0 OpenAI：user 放 `OPENAI_API_KEY` secret（另兩把 key 不設，或設 `LLM_PROVIDER=openai`）、確認 org data sharing 開著 -> 手動 Test Bot（PUBLISH 未設）-> 對 Summary 今日免費 token 與 OpenAI usage 頁、log 有無 incomplete／web search 引用，校正 `O_*` token 假設；research 花費撐不到月底就考慮 `OPENAI_WEB_SEARCH_MAX_CALLS=1`。
+- v0.3.0 OpenAI：已上線（10-23 起 PUBLISH=1）；tool token 假設 10-26 已校準（見收工日誌）。剩：校正 `O_*` token 假設（Usage 頁 472K tokens／153 requests 可當起點）；11 月首次週檢對本機記帳 vs Usage 頁。
 - v0.2.0 Anthropic：user 放 `ANTHROPIC_API_KEY` secret（不設 OPENROUTER_API_KEY 就自動走 Anthropic）、評估本期已花多少再設 `ANTHROPIC_BUDGET_USD` -> 手動跑 Test Bot（PUBLISH 未設）-> 對 Summary 的本期花費 vs Console 實際用量、log 有無 refusal／web search error／max_tokens 警告，校正 `A_*` token 假設。
 - user 放好 secrets、確認 auto top-up 關閉、填表單後：手動跑 Test Bot（PUBLISH 未設）-> 看 Summary 有無紅框、花費、log 裡 web search 有沒有引用來源。過了就設 BOT_ENABLED=1＋PUBLISH=1。
 - 第一次真跑後對：precheck 列題數＝main 抓到的題數；Summary 每題實際花費 vs 估算（tier 成本在 budget.py 的 token 假設，要校正）；standings 那段是否讀得到。
