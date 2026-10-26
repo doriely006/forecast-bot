@@ -87,3 +87,28 @@ def test_bad_payload_dumps_shape_without_values():
     assert secret not in lines and "email" not in lines
     assert all(len(x) <= 400 for x in lines.splitlines())
     assert "top=list" in standings.shape_of([{"a": secret}]) and secret not in standings.shape_of([{"a": secret}])
+
+
+def test_list_payload_picks_primary_then_first():
+    e = lambda n: {"entries": [{"user": {"username": n}, "rank": 1}]}
+    assert standings.parse_entries([e("a"), {**e("b"), "is_primary_leaderboard": True}])[0].username == "b"
+    assert standings.parse_entries([e("a"), e("b")])[0].username == "a"
+    assert standings.parse_entries([{"entries": []}]) == []
+    assert standings.parse_entries([]) == []
+
+
+def test_empty_board_is_clean_and_unusable_entries_dump_entry_shape():
+    secret = "SECRET-VALUE-123"
+
+    def get(url, headers=None, timeout=30):
+        if url.endswith("/users/me"):
+            return {"username": ME}
+        if "/projects/tournaments/" in url:
+            return {"id": 7}
+        if url.endswith("/leaderboards/project/33121/"):
+            return [{"is_primary_leaderboard": True, "entries": []}]
+        return [{"entries": [{"who": {"name": secret}, "pos": secret}]}]
+
+    lines = "\n".join(standings.standings_lines({"METACULUS_TOKEN": "t"}, get))
+    assert "正賽：榜上 0 筆" in lines
+    assert "first entry keys=who->{name},pos" in lines and secret not in lines

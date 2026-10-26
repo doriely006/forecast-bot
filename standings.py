@@ -47,20 +47,48 @@ def _num(x: Any) -> float | None:
         return None
 
 
-def parse_entries(payload: dict[str, Any]) -> list[Entry]:
+class EntryShapeError(ValueError):
+    """Entries present but unreadable; carries a values-free shape of the first entry."""
+
+    def __init__(self, msg: str, shape: str):
+        super().__init__(msg)
+        self.shape = shape
+
+
+def entry_shape(e: Any) -> str:
+    if not isinstance(e, dict):
+        return f"first entry type={type(e).__name__}"
+    parts = []
+    for k, v in e.items():
+        if isinstance(v, dict):
+            parts.append(f"{k}->{{{','.join(str(x) for x in v)}}}")
+        else:
+            parts.append(str(k))
+    return "first entry keys=" + ",".join(parts)
+
+
+def parse_entries(payload: Any) -> list[Entry]:
+    if isinstance(payload, list):  # real API: list of leaderboard objects, each with `entries`
+        boards = [b for b in payload if isinstance(b, dict)]
+        payload = next((b for b in boards if b.get("is_primary_leaderboard")), boards[0] if boards else {})
     raw = payload.get("entries")
     if raw is None:
         raw = payload.get("results", [])
     out = []
-    for e in raw:
-        user = e.get("user") or {}
-        name = user.get("username") or e.get("username") or ""
-        if not name:
-            continue
-        q = e.get("contribution_count", e.get("question_count"))
-        rank = e.get("rank")
-        out.append(Entry(name, user.get("is_bot", e.get("is_bot")), int(rank) if rank is not None else None,
-                         _num(e.get("score")), _num(e.get("prize")), int(q) if q is not None else None))
+    try:
+        for e in raw:
+            user = e.get("user") or {}
+            name = user.get("username") or e.get("username") or ""
+            if not name:
+                continue
+            q = e.get("contribution_count", e.get("question_count"))
+            rank = e.get("rank")
+            out.append(Entry(name, user.get("is_bot", e.get("is_bot")), int(rank) if rank is not None else None,
+                             _num(e.get("score")), _num(e.get("prize")), int(q) if q is not None else None))
+    except Exception as ex:
+        raise EntryShapeError(f"{ex.__class__.__name__}: {ex}", entry_shape(raw[0])) from ex
+    if raw and not out:
+        raise EntryShapeError("no usable username in entries", entry_shape(raw[0]))
     return out
 
 
@@ -141,8 +169,11 @@ def standings_lines(
             entries = parse_entries(get(f"{base}/leaderboards/project/{pid}/"))
         except Exception as e:
             detail = f"{e.__class__.__name__}: {e}"[:200]
-            shape = shape_of(seen[-1]) if seen and seen[-1] is not None else "no response body"
+            shape = e.shape if isinstance(e, EntryShapeError) else shape_of(seen[-1]) if seen and seen[-1] is not None else "no response body"
             lines.append(f"- {label}：讀不到排行榜（{detail}）；回應形狀 {shape}"[:400])
+            continue
+        if not entries:
+            lines.append(f"- {label}：榜上 0 筆")
             continue
         found = non_metac_standing(entries, me)
         if found is None:

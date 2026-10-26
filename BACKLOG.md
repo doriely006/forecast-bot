@@ -2,6 +2,12 @@
 
 ## 收工日誌
 
+### 2026-10-26 v0.3.3 standings 真形狀（run 40336280903）
+- bot 帳號＝midnightsharp-bot（users/me 實測）。`GET /leaderboards/project/<id>/` 回 list of leaderboard 物件（鍵含 is_primary_leaderboard／entries／bot_exclusion_status…），resolve_project 正常。
+- `parse_entries`：list -> 取 is_primary_leaderboard 為真者，否則第一個，讀其 `entries`；dict 舊路徑不變。
+- entries 內欄位名仍未知：全無 username 或解析丟例外 -> `EntryShapeError`，失敗行印首筆 entry 的 key（巢狀 dict 展一層，不印值）。entries 空 -> `榜上 0 筆`（正常狀態）。
+- 待：下次手動跑看首筆 entry keys，必要時調 name/rank/score/is_bot 欄位讀法。
+
 ### 2026-10-26 v0.3.2 standings
 - `due()` 改「當日第一輪」：日期存 `.state/standings_day`（YYYY-MM-DD，UTC）；缺檔／讀不到＝跑（fail-open）；workflow_dispatch 永遠跑。
 - `mark_done` 在 fetch 前寫日期並 touch `.state/changed`（precheck 已先 clear_changed，cache restore 在 precheck 之前，順序不用動）-> 尾端 cache/save 存新 entry。標在 fetch 前＝榜讀失敗也不會每 20 分鐘重打。
