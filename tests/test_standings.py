@@ -82,8 +82,8 @@ def test_bad_payload_dumps_shape_without_values():
         return {"results": [secret, secret], "meta": {"x": secret}}  # strings, not dicts -> AttributeError
 
     lines = "\n".join(standings.standings_lines({"METACULUS_TOKEN": "t"}, odd))
-    assert lines.count("讀不到排行榜（AttributeError") == 2
-    assert "top=dict" in lines and "keys=results,meta" in lines and "first element type=str" in lines
+    assert lines.count("讀不到排行榜（EntryShapeError: AttributeError") == 2
+    assert "first entry type=str" in lines
     assert secret not in lines and "email" not in lines
     assert all(len(x) <= 400 for x in lines.splitlines())
     assert "top=list" in standings.shape_of([{"a": secret}]) and secret not in standings.shape_of([{"a": secret}])
