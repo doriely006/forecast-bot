@@ -2,6 +2,11 @@
 
 ## 收工日誌
 
+### 2026-10-26 OpenAI 帳單校準
+- user 截 Usage 頁：10 月實付 $0.35（org 上限 $5.00），35 web search requests，472,836 tokens／153 requests。本機記帳同期 $0.75。
+- $0.35＝35×$0.01 -> 用 tool 的請求 token 也走免費額度，只收 search 費；v0.3.0「tool 請求整筆付費」假設證偽。
+- repo var `OPENAI_TOOL_TOKENS_FREE=1` 已設（主 session，gh variable set）。下輪週檢對：本機記帳 vs Usage 頁應接近。
+
 ### 週檢 2026-10-25
 - 「Forecast on tournament questions」10-18 起：success 11／failure 1／skipped 33（precheck 無工作）。唯一 failure＝39991270934（10-23 首輪 live，405 already closed，v0.3.1 已修），之後全綠。
 - 本週新交 4（40108814448:2、40133156079:1、40150278803:1）；失敗 0（v0.3.1 後）；臨截止跳過 0；預算不足跳過 0。
