@@ -147,6 +147,7 @@ class Outcome:
     detail: str = ""
     cost: float = 0.0
     fatal: bool = False  # run-wide 401/402 (or Anthropic credit exhausted): not this question's fault, never counted
+    key: str = ""  # v0.4.1: state question key (provider log)
 
 
 @dataclass
@@ -188,6 +189,10 @@ class RunResult:
     plan_reason: str = ""
     notes: list[str] = field(default_factory=list)  # v0.4.0: yellow notes (per-tournament provider fallback)
     forecast_keys: set[str] = field(default_factory=set)  # v0.4.0: stop-loss prune set of this run
+    fell_back: str = ""  # v0.4.1: provider unusable -> reason; its unsent questions went to `fallback_to`
+    fallback_to: str = ""
+    moved: int = 0  # v0.4.1: questions handed to the fallback provider
+    fallback_of: str = ""  # v0.4.1: set on the fallback run: the provider it stood in for
 
     def count(self, *statuses: str) -> int:
         return sum(o.status in statuses for o in self.outcomes)
@@ -279,7 +284,11 @@ async def run(
     probe_fn: Callable[[], Awaitable[Any]] | None = None,
     provider: str | None = None,
     prune_failures: bool = True,
+    only_urls: set[str] | None = None,
+    serial_first: bool = False,
 ) -> RunResult:
+    """only_urls (v0.4.1 fallback): forecast only these questions. serial_first (v0.4.1): the first question
+    runs alone, so an unusable provider costs one failing call, not `concurrency` of them."""
     env = dict(os.environ) if env is None else env
     provider = provider or budget.select_provider(env)
     lookup = key_lookup_fn()
@@ -313,6 +322,8 @@ async def run(
             result.fetch_auth_error |= code in (401, 403)
             result.fetch_errors.append(f"{name}: {e.__class__.__name__}: {str(e)[:200]}")
             continue
+        if only_urls is not None:
+            questions = [q for q in questions if q.page_url in only_urls]
         result.open_counts[name] = len(questions)
         for q in questions:
             result.windows.append(
@@ -367,9 +378,11 @@ async def run(
                     bots[budget.kind_of(name)], client, name, q, publish, key_lookup_fn, env, stop, result, store
                 )
                 _count_failure(store, name, q, outcome, now)
+                outcome.key = _qkey(q)
                 return outcome
 
-        result.outcomes = list(await asyncio.gather(*[one(n, q) for n, q in to_forecast]))
+        head = [await one(*to_forecast[0])] if serial_first else []
+        result.outcomes = head + list(await asyncio.gather(*[one(n, q) for n, q in to_forecast[len(head):]]))
         if probe_fn is not None and _upstream_suspect(result.outcomes):
             await _health_probe(probe_fn, result, next(iter(prices.values()))[1], store, stop)
 
@@ -732,6 +745,25 @@ class Group:
     models: dict[str, tuple[str, str]]
     prices: dict[str, tuple[tuple[float, float], tuple[float, float]]]
     probe_fn: Callable[[], Awaitable[Any]] | None = None
+    fallback: Callable[[], "Group"] | None = None  # v0.4.1: same kind on the global provider, built only when needed
+
+
+MOVABLE = ("stopped", "skipped_budget")  # v0.4.1: never reached the provider because it was unusable
+
+
+def unusable(r: RunResult) -> tuple[str, list[Outcome]]:
+    """v0.4.1 -> (reason, questions to hand over) when this group's provider was unusable: budget stop,
+    run-wide 401/402 mid-run, or a fatal health probe. Ordinary per-question failures hand over nothing."""
+    probe_fatal = r.probe == "fatal"
+    moved = [o for o in r.outcomes if o.status in MOVABLE
+             or (o.status == "failed" and (o.fatal or probe_fatal))]
+    if not moved:
+        return "", []
+    budget_stop = next((o.detail for o in moved if o.status == "skipped_budget"), "")
+    reason = r.fatal or (f"{r.label()}: {budget_stop}" if budget_stop else f"{r.label()}: {r.decision.reason}")
+    if probe_fatal and r.probe_error:
+        reason += f"（探測：{r.probe_error[:150]}）"
+    return reason, moved
 
 
 def provider_problems(r: RunResult) -> list[str]:
@@ -756,21 +788,26 @@ class SplitResult:
         return [o for r in self.groups for o in r.outcomes]
 
     @property
+    def active(self) -> list[RunResult]:
+        """v0.4.1: a group that fell back is judged by its fallback run, not by its own provider trouble."""
+        return [r for r in self.groups if not r.fell_back]
+
+    @property
     def healthy(self) -> bool:
         """At least one group ran without provider trouble: the others' trouble is then only yellow."""
-        return any(not provider_problems(r) for r in self.groups)
+        return any(not provider_problems(r) for r in self.active)
 
     @property
     def demoted(self) -> list[tuple[RunResult, str]]:
         if not self.healthy:
             return []
-        return [(r, p) for r in self.groups for p in provider_problems(r)]
+        return [(r, p) for r in self.active for p in provider_problems(r)]
 
     @property
     def systemic(self) -> list[str]:
         out = list(self.crashes)
         if not self.healthy:
-            out += [p for r in self.groups for p in provider_problems(r)]
+            out += [p for r in self.active for p in provider_problems(r)]
         errors = [e for r in self.groups for e in r.fetch_errors]
         opened = any(r.open_counts for r in self.groups)
         if any(r.fetch_auth_error for r in self.groups) or (errors and not opened):
@@ -801,31 +838,98 @@ async def run_split(*, mode: str, publish: bool, groups: list[Group], client: An
                     concurrency: int = 3, notes: list[str] | None = None) -> SplitResult:
     """Groups run one after another (main first), each a full `run` on its own provider."""
     split = SplitResult(version, mode, publish, notes=list(notes or []))
-    for g in groups:
+
+    async def one_group(g: Group, only: set[str] | None = None) -> RunResult | None:
         if store is not None:
             _fresh_write_ahead(store)
         try:
-            r = await run(mode=mode, publish=publish, bot_factory=g.bot_factory, client=client,
-                          key_lookup_fn=g.key_lookup_fn, version=version, models=g.models, prices=g.prices,
-                          env=g.env, tournaments=g.tournaments, concurrency=concurrency, store=store,
-                          today=today, now=now, probe_fn=g.probe_fn, provider=g.provider, prune_failures=False)
+            return await run(mode=mode, publish=publish, bot_factory=g.bot_factory, client=client,
+                             key_lookup_fn=g.key_lookup_fn, version=version, models=g.models, prices=g.prices,
+                             env=g.env, tournaments=g.tournaments, concurrency=concurrency, store=store,
+                             today=today, now=now, probe_fn=g.probe_fn, provider=g.provider, prune_failures=False,
+                             only_urls=only, serial_first=g.fallback is not None)
         except Exception as e:
             split.crashes.append(f"{g.kind}（{g.provider}）沒跑完：{e.__class__.__name__}: {str(e)[:300]}")
+            return None
+
+    for g in groups:
+        r = await one_group(g)
+        if r is None:
             continue
         split.groups.append(r)
+        reason, moved = unusable(r) if g.fallback is not None else ("", [])
+        if not moved:
+            continue
+        try:  # v0.4.1: the unsent questions of this run go to the global provider, same run
+            fb_group = g.fallback()
+        except Exception as e:
+            split.crashes.append(f"{g.kind} 備援沒建起來：{e.__class__.__name__}: {str(e)[:300]}")
+            continue
+        fb = await one_group(fb_group, {o.url for o in moved})
+        if fb is None:
+            continue
+        fb.fallback_of, fb.windows = r.provider, []  # its questions are already listed by `r`
+        r.fell_back, r.fallback_to, r.moved = reason, fb.provider, len(moved)
+        r.outcomes = [o for o in r.outcomes if not any(o is m for m in moved)]
+        split.groups.append(fb)
     if store is not None and mode == "tournament" and split.groups and not split.crashes \
             and not any(r.fetch_errors for r in split.groups):
         store.prune_failures(set().union(*(r.forecast_keys for r in split.groups)))
+    if store is not None and publish and mode == "tournament":
+        record_providers(store, split.groups, today or budget.utc_today())
     return split
+
+
+PROVIDER_LOG = "provider_log.jsonl"
+LOGGED_KINDS = ("minibench",)  # v0.4.1: comparison integrity: who answered each MiniBench question
+
+
+def record_providers(store: Any, groups: list[RunResult], day: date) -> int:
+    """Append one line per published MiniBench question (id, provider, model, date) to .state/provider_log.jsonl
+    and touch .state/changed so the workflow cache keeps it. Never raises."""
+    import json
+
+    rows = []
+    for r in groups:
+        for kind in LOGGED_KINDS:
+            if kind not in r.models:
+                continue
+            for o in r.outcomes:
+                if o.status in ("submitted", "comment_failed") and budget.kind_of(o.tournament) == kind:
+                    rows.append({"id": o.key, "provider": r.provider, "model": r.models[kind][0],
+                                 "date": day.isoformat()})
+    if not rows:
+        return 0
+    try:
+        d = store.path.parent
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / PROVIDER_LOG, "a", encoding="utf-8") as f:
+            f.writelines(json.dumps(x, separators=(",", ":")) + "\n" for x in rows)
+        (d / "changed").write_text("1", encoding="utf-8")
+    except (OSError, AttributeError) as e:
+        logger.warning(f"provider log not written: {e}")
+        return 0
+    return len(rows)
 
 
 def render_split_summary(s: SplitResult, with_header: bool = True) -> str:
     lines: list[str] = [precheck.summary_header(s.publish), ""] if with_header else []
     lines += [f"## forecast-bot v{s.version}：預測", ""]
     lines.append(f"- 模式：`{s.mode}`" + ("" if s.publish else "（DRY RUN，什麼都不送）"))
-    lines.append("- 各賽事分開跑：" + "；".join(f"{'、'.join(r.models)} {r.provider}" for r in s.groups))
+    lines.append("- 各賽事分開跑：" + "；".join(f"{'、'.join(r.models)} {r.provider}" for r in s.groups if not r.fallback_of))
+    for r in s.groups:
+        if r.fell_back:  # v0.4.1
+            kinds = "、".join(r.models)
+            fb = [x for x in s.groups if x.fallback_of and set(x.models) == set(r.models)]
+            counts = "、".join(f"{x.provider} {x.count('submitted', 'comment_failed', 'dry_run')}" for x in [r, *fb])
+            lines.append(f"- {kinds} 這輪送出：{counts}")
     for reason in s.systemic:
         lines += _block("CAUTION", f"**停止／系統性問題**：{reason}")
+    for r in s.groups:
+        if r.fell_back:
+            name = "、".join(r.open_counts) or "、".join(r.models)
+            lines += _block("WARNING", f"**{name} 這輪改用 {r.fallback_to}**（原因：{r.fell_back}）；"
+                            f"已送出的不重做，其餘 {r.moved} 題改由 {r.fallback_to} 作答")
     for r, reason in s.demoted:
         lines += _block("WARNING", f"**{'、'.join(r.models)}（{r.label()}）這輪停了，另一個賽事照跑**：{reason}")
     for note in s.notes:
@@ -834,7 +938,8 @@ def render_split_summary(s: SplitResult, with_header: bool = True) -> str:
         skipped = [x for r in s.groups for x in r.skipped_failing]
         lines += render_skipped(skipped, s.groups[0].fail_limit, s.groups[0].cooldown_hours)
     for r in s.groups:
-        lines += render_summary(r, with_header=False, section=f"{'、'.join(r.models)}：{r.provider}").rstrip("\n").split("\n")
+        title = f"{'、'.join(r.models)}：{r.provider}" + ("（備援）" if r.fallback_of else "")
+        lines += render_summary(r, with_header=False, section=title).rstrip("\n").split("\n")
     if with_header:
         lines += _windows([w for r in s.groups for w in r.windows])
     return "\n".join(lines) + "\n"

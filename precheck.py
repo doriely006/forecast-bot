@@ -29,7 +29,7 @@ from typing import Any, Callable
 import budget
 import state as state_mod
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 SWITCHES = ("BOT_ENABLED", "PUBLISH", "DRY_RUN_LLM")
 # Must equal forecasting_tools.MetaculusClient.CURRENT_AI_COMPETITION_ID /
 # CURRENT_MINIBENCH_ID (asserted in tests).
@@ -471,20 +471,31 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
         systemic += [part.problem] if part.problem else []
         needs_llm = part.needs_llm
     else:  # v0.4.0: each tournament on its own provider; one provider's trouble only stops its tournament
-        parts = {}
+        parts, fell = {}, {}
+        base = budget.select_provider(env)
         for kind in budget.KINDS:
             provider = plan[kind][0]
             mine = [it for it in items if budget.kind_of(it.tournament) == kind]
+            mine_new = [it for it in new if budget.kind_of(it.tournament) == kind]
             parts[kind] = _provider_part(budget.provider_env(env, provider, [kind]), provider, store, deps, mine,
-                                         [it for it in new if budget.kind_of(it.tournament) == kind], publish, dry_llm)
+                                         mine_new, publish, dry_llm)
+            if parts[kind].problem and provider != base:  # v0.4.1: the run will hand this tournament to `base`
+                fell[kind] = parts[kind]
+                parts[kind] = _provider_part(budget.provider_env(env, base), base, store, deps, mine, mine_new,
+                                             publish, dry_llm)
         healthy = any(not pt.problem for pt in parts.values())
-        for pt in parts.values():
+        for pt in [*fell.values(), *parts.values()]:
             lines += pt.warn
         lines.append(open_line)
         for kind, pt in parts.items():
-            lines.append(f"- {kind}（{pt.provider}）：")
+            if kind in fell:
+                lines.append(f"- {kind}（{fell[kind].provider}，用不了）：")
+                lines += ["  " + x for x in fell[kind].info]
+            lines.append(f"- {kind}（{pt.provider}" + ("，備援" if kind in fell else "") + "）：")
             lines += ["  " + x for x in pt.info]
         lines += budget.provider_schedule_notes(env, deps.now().date())
+        for kind, old in fell.items():
+            lines += _block("WARNING", f"**{kind} 這輪改用 {parts[kind].provider}**（原因：{old.problem}）")
         for kind, pt in parts.items():
             if pt.problem and healthy:
                 lines += _block("WARNING", f"**{kind}（{budget.provider_label(pt.provider)}）這輪不跑，另一個賽事照跑**：{pt.problem}")

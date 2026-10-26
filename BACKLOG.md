@@ -2,6 +2,17 @@
 
 ## 收工日誌
 
+### 2026-10-27 v0.4.1 MiniBench 備援：Anthropic 用不了就改 OpenAI（同一輪）
+- user 10-26 裁定：MiniBench 不准停。觸發＝`runner.unusable(r)`：有 `stopped`／`skipped_budget` outcome，或 fatal failed，或 probe fatal（連 non-fatal failed 也搬）。一般單題失敗不觸發（照計數）。
+- `Group.fallback`（lazy callable）：main.py 對 provider≠全域的組掛 `make_group(kind, 全域, solo=False)`＝不帶 `_PACE_KINDS`，配速同 11-01 前 OpenAI 兼兩賽事（含 C6 minimum）；同一 store＝OpenAI 免費 token／月付費同一本帳。
+- `run()` 新 kwarg（預設關＝v0.4.0）：`only_urls`（備援只做被搬的題，抓題後過濾）、`serial_first`（有 fallback 的組第一題單跑 -> 死 provider 一輪只吃 1 個失敗請求；SDK 內建 429 重試仍可能多打，見沒驗）。
+- `run_split`：被搬的 outcome 從原組移除，原組記 `fell_back`／`fallback_to`／`moved`，備援組 `fallback_of`、windows 清空。`SplitResult.active` 排除 fell_back 組 -> 健康／降黃／紅只看備援結果；OpenAI 也壞＝同 v0.4.0（main 好黃、都壞紅）。
+- Summary：黃框「MiniBench 這輪改用 openai（原因：…）」＋「minibench 這輪送出：anthropic N、openai M」＋`### minibench：openai（備援）`。precheck：Anthropic part 有 problem 且≠全域 -> 再算一份全域 part（`minibench（anthropic，用不了）`／`（openai，備援）`＋黃框），work 看備援。
+- `.state/provider_log.jsonl`：split＋publish＋tournament 時每題 MiniBench 已送（submitted/comment_failed）一行 `{id,provider,model,date}`，touch `changed`。單一路徑（11-01 前）不寫。
+- 版號 0.4.1（pyproject／main／precheck／README／test_workflows）。README provider 段加一段。
+- 測試 209 passed（舊 200，改 1：precheck 預算停改斷言備援；新 9）。
+- 沒驗：真 402 時 SDK／forecasting_tools 是否一個請求就拋（Anthropic SDK max_retries=2 對 429 會重試）；真 API 的備援 run。
+
 ### 2026-10-26 v0.4.0 每賽事分開 provider（MiniBench 11-01 起 Claude）
 - 新 var：`MAIN_LLM_PROVIDER`／`MINIBENCH_LLM_PROVIDER`（值同 LLM_PROVIDER）＋`*_LLM_PROVIDER_FROM`（UTC 日期，空＝即刻）。壞值／壞日期＝validate_switches 紅。
 - `budget.tournament_provider`：未設、日期前、或＝全域 -> `select_provider`；key 缺 -> 全域＋黃框 note。`provider_env(env, p, [kind])` 複製 env、只在 p≠全域時塞 LLM_PROVIDER、加內部 `_PACE_KINDS`；既有 lookup_for／provider_prices／pacing_horizon 全跟著走。
@@ -135,7 +146,7 @@
 - SDK 實讀：`publish_report_to_metaculus` 先 POST forecast 再 POST `/comments/create/`（`is_private=True`）；explanation 必須以 `#` 開頭；`get_all_open_questions_from_tournament` 只抓第一頁 100 題。
 
 ### 下一輪開工先做
-- v0.4.0 MiniBench Claude（11-01 自動切）：10-26 主 session 已設 var `LLM_PROVIDER=openai`、`ANTHROPIC_BUDGET_USD=14`（Console credit $14.72）、`BUDGET_STOP_BELOW=0.5`（只 Anthropic 吃）、`MINIBENCH_LLM_PROVIDER=anthropic`、`MINIBENCH_LLM_PROVIDER_FROM=2026-11-01`；run 40346375097 v0.4.0 綠、Provider openai。secret `ANTHROPIC_API_KEY` 10-26 user 已放（key 到期 2027 年底）。Console org 月上限 $100 本月已被**非 bot** 用量吃滿（$100.28，Max 5x 附送 $100 API credit 10-12 入帳、11-15 到期），11-01 00:00 UTC 才恢復；11 月那個不明用量會跟 bot 搶同一個上限，10-26 查出：主因＝10-18 twin 判官 eval（當時 `claude -p` 被記成 API，約 $68）；10-26 實測 `claude -p` 已走訂閱（API 被擋時照樣成功），原因未明（memory claude-p-bills-api-credit）。11-01 手動跑一次：Summary 要有 `### main：openai`／`### minibench：anthropic` 兩節、MiniBench 本期花費有動、Console 用量對得上。
+- v0.4.0 MiniBench Claude（11-01 自動切）：10-26 主 session 已設 var `LLM_PROVIDER=openai`、`ANTHROPIC_BUDGET_USD=14`（Console credit $14.72）、`BUDGET_STOP_BELOW=0.5`（只 Anthropic 吃）、`MINIBENCH_LLM_PROVIDER=anthropic`、`MINIBENCH_LLM_PROVIDER_FROM=2026-11-01`；run 40346375097 v0.4.0 綠、Provider openai。secret `ANTHROPIC_API_KEY` 10-26 user 已放（key 到期 2027 年底）。Console org 月上限 $100 本月已被**非 bot** 用量吃滿（$100.28，Max 5x 附送 $100 API credit 10-12 入帳、11-15 到期），11-01 00:00 UTC 才恢復；11 月那個不明用量會跟 bot 搶同一個上限，10-26 查出：主因＝10-18 twin 判官 eval（當時 `claude -p` 被記成 API，約 $68）；10-26 實測 `claude -p` 已走訂閱（API 被擋時照樣成功），原因未明（memory claude-p-bills-api-credit）。11-01 手動跑一次：Summary 要有 `### main：openai`／`### minibench：anthropic` 兩節、MiniBench 本期花費有動、Console 用量對得上；若 Anthropic org 上限仍滿（v0.4.1）：要看到黃框「MiniBench 這輪改用 openai（原因：…）」、`### minibench：openai（備援）`、`.state/provider_log.jsonl` 有 openai 行，job 綠。
 - standings v0.3.3 真跑 OK（run 40336563878）：bot 帳號 midnightsharp-bot；正賽 33121 榜 359 筆、尚無本 bot（未有結算題）；MiniBench 榜 0 筆。剩：隔天確認排程只跑一次；本 bot 上榜後核對名次欄位讀法（entry 欄位對應未經真資料驗）。
 - v0.3.0 OpenAI：已上線（10-23 起 PUBLISH=1）；tool token 假設 10-26 已校準（見收工日誌）。剩：校正 `O_*` token 假設（Usage 頁 472K tokens／153 requests 可當起點）；11 月首次週檢對本機記帳 vs Usage 頁。
 - v0.2.0 Anthropic：user 放 `ANTHROPIC_API_KEY` secret（不設 OPENROUTER_API_KEY 就自動走 Anthropic）、評估本期已花多少再設 `ANTHROPIC_BUDGET_USD` -> 手動跑 Test Bot（PUBLISH 未設）-> 對 Summary 的本期花費 vs Console 實際用量、log 有無 refusal／web search error／max_tokens 警告，校正 `A_*` token 假設。

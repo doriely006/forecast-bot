@@ -246,11 +246,20 @@ def test_precheck_unset_vars_has_no_split_lines(tmp_path):
     assert code == 0 and text.count("- Provider：openai") == 1 and "（openai）：" not in text and "預定" not in text
 
 
-def test_precheck_minibench_out_of_budget_is_yellow_main_is_work(tmp_path):
+def test_precheck_minibench_out_of_budget_falls_back_to_openai(tmp_path):
     state.PendingComments.load(tmp_path).add_spend("2026-10-13", 13.0)
     code, work, text = _precheck(tmp_path, SPLIT)
-    assert code == 0 and work is True and "minibench（Anthropic）這輪不跑，另一個賽事照跑" in text
-    assert "> [!CAUTION]" not in text
+    assert code == 0 and work is True and "**minibench 這輪改用 openai**（原因：Anthropic：remaining $2.00" in text
+    assert "- minibench（anthropic，用不了）：" in text and "- minibench（openai，備援）：" in text
+    assert "> [!CAUTION]" not in text and "這輪不跑" not in text
+
+
+def test_precheck_both_out_is_as_v040(tmp_path):
+    book = state.PendingComments.load(tmp_path)
+    book.add_spend("2026-10-13", 13.0)
+    book.add_openai(DAY.isoformat(), "2026-11", None, 0, 4.4)  # OpenAI under its stop line too
+    code, work, text = _precheck(tmp_path, SPLIT)
+    assert code == 1 and work is False and "> [!CAUTION]" in text
 
 
 def test_precheck_missing_anthropic_key_falls_back_yellow(tmp_path):
@@ -276,3 +285,155 @@ def test_make_group_wires_each_tournament_to_its_own_provider(tmp_path, monkeypa
     assert m.env["LLM_PROVIDER"] == "openai" and budget.pace_kinds(m.env) == ("main",)
     assert mb.key_lookup_fn().provider == "anthropic" and mb.key_lookup_fn().info.limit == 15.0
     assert m.key_lookup_fn().provider == "openai" and mb.probe_fn is not None and m.probe_fn is not None
+
+
+# ------------------------------------------------------------ v0.4.1 fallback to the global provider
+
+
+class SeqBot(Bot):
+    """Succeeds for the first `ok` questions, then raises `exc` (per call, not per question)."""
+
+    def __init__(self, ok, exc, fail_posts=()):
+        super().__init__()
+        self.ok, self.exc_after, self.fail_posts = ok, exc, set(fail_posts)
+
+    async def forecast_questions(self, qs, return_exceptions=False):
+        self.seen += [q.id_of_post for q in qs]
+        if qs[0].id_of_post in self.fail_posts or (self.exc_after and len(self.seen) > self.ok):
+            raise self.exc_after or RuntimeError("this question broke")
+        return [Report(qs[0], 0.0)]
+
+
+def fb_groups(store, mb_bot, fb_bot, made=None, on_call=None):
+    gs = groups(store, Bot(on_call=on_call), mb_bot)
+
+    def fallback():
+        if made is not None:
+            made.append(1)
+        genv = budget.provider_env(SPLIT, "openai")  # global provider pacing both tournaments, as before 11-01
+        return runner.Group("minibench", "openai", genv, [TOURNAMENTS[1]],
+                            lambda: budget.openai_lookup_from_store(genv, store, DAY), lambda k, t: fb_bot,
+                            {"minibench": O_MODELS}, {"minibench": O_PRICE})
+
+    gs[1].fallback = fallback
+    return gs
+
+
+def run_fb(store, gs, concurrency=1):
+    client = FakeClient()
+    s = asyncio.run(runner.run_split(mode="tournament", publish=True, groups=gs, client=client, version=main.VERSION,
+                                     store=store, today=DAY, now=NOW, concurrency=concurrency))
+    return s, client
+
+
+def log_rows(tmp_path):
+    import json
+    path = tmp_path / runner.PROVIDER_LOG
+    return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_budget_stop_falls_back_to_openai_same_run(tmp_path):
+    store = state.PendingComments.load(tmp_path)
+    store.add_spend("2026-10-13", 13.0)  # Anthropic below its stop line before any call
+    mb, fb = Bot(), Bot()
+    s, client = run_fb(store, fb_groups(store, mb, fb))
+    assert not mb.seen and sorted(fb.seen) == [201, 202, 203, 204]
+    assert [r.provider for r in s.groups] == ["openai", "anthropic", "openai"] and s.groups[2].fallback_of == "anthropic"
+    assert s.exit_code == 0 and not s.demoted and s.groups[1].moved == 4 and s.groups[1].count("skipped_budget") == 0
+    text = runner.render_split_summary(s)
+    assert "**MiniBench 這輪改用 openai**（原因：Anthropic: remaining $2.00" in text
+    assert "- minibench 這輪送出：anthropic 0、openai 4" in text and "### minibench：openai（備援）" in text
+    assert "這輪停了" not in text and "> [!CAUTION]" not in text
+
+
+def test_402_mid_run_moves_only_the_unsent_questions(tmp_path):
+    store = state.PendingComments.load(tmp_path)
+    credit = main.AnthropicCreditError("Anthropic credit/spend limit reached (HTTP 400): spend limit")
+    mb, fb = SeqBot(1, credit), Bot()
+    s, client = run_fb(store, fb_groups(store, mb, fb))
+    assert len(mb.seen) == 2 and sorted(fb.seen) == sorted({201, 202, 203, 204} - {mb.seen[0]})  # sent one not redone
+    a = s.groups[1]
+    assert a.count("submitted") == 1 and a.moved == 3 and a.fell_back.startswith("Anthropic HTTP 402")
+    assert store.failures == {} and s.exit_code == 0
+    assert "- minibench 這輪送出：anthropic 1、openai 3" in runner.render_split_summary(s)
+    rows = [r for r in log_rows(tmp_path)]
+    assert sorted((r["provider"], r["model"]) for r in rows) == [("anthropic", A_MODELS[0])] + [("openai", O_MODELS[0])] * 3
+    assert {r["date"] for r in rows} == {DAY.isoformat()} and (tmp_path / "changed").exists()
+    assert {r["id"] for r in rows} == {state.question_key(q.id_of_question, q.id_of_post)
+                                       for q in client.questions["MiniBench"]}
+
+
+def test_dead_anthropic_costs_one_call_even_with_concurrency(tmp_path):
+    store = state.PendingComments.load(tmp_path)
+    mb, fb = Bot(main.AnthropicCreditError("credit balance too low")), Bot()
+    s, _ = run_fb(store, fb_groups(store, mb, fb), concurrency=3)
+    assert len(mb.seen) == 1 and len(fb.seen) == 4 and s.exit_code == 0
+
+
+def test_probe_fatal_falls_back(tmp_path):
+    store = state.PendingComments.load(tmp_path)
+
+    async def dead_probe():
+        raise main.AnthropicCreditError("credit balance too low")
+
+    mb, fb = Bot(RuntimeError("upstream says no")), Bot()
+    gs = fb_groups(store, mb, fb)
+    gs[1].probe_fn = dead_probe
+    s, _ = run_fb(store, gs)
+    a = s.groups[1]
+    assert a.probe == "fatal" and a.moved == 4 and len(fb.seen) == 4 and a.count("failed") == 0
+    assert store.failures == {} and s.exit_code == 0
+
+
+def test_ordinary_question_failure_does_not_fall_back(tmp_path):
+    store = state.PendingComments.load(tmp_path)
+    made = []
+    mb = SeqBot(99, None, fail_posts={202})
+    s, _ = run_fb(store, fb_groups(store, mb, Bot(), made))
+    assert not made and len(s.groups) == 2 and not s.groups[1].fell_back
+    assert s.groups[1].count("submitted") == 3 and s.groups[1].failed == 1 and set(store.failures) == {"2202"}
+    assert {r["provider"] for r in log_rows(tmp_path)} == {"anthropic"} and len(log_rows(tmp_path)) == 3
+
+
+def test_fallback_is_charged_to_the_openai_ledger(tmp_path):
+    store = state.PendingComments.load(tmp_path)
+    store.add_spend("2026-10-13", 13.0)
+    orecord = main.make_openai_recorder(store, budget.provider_env(SPLIT, "openai"))
+    usage = {"input_tokens": 1000, "output_tokens": 500, "total_tokens": 1500}
+    call = lambda: orecord("gpt-5.4-mini", usage, 1, False)  # noqa: E731
+    month, start = budget.month_key(budget.utc_today()), budget.credit_period(
+        budget.utc_today(), budget.credit_reset_day(SPLIT))[0].isoformat()
+    s, _ = run_fb(store, fb_groups(store, Bot(), Bot(on_call=call), on_call=call))
+    assert store.openai_month_spent(month) == pytest.approx((3 + 4) * 0.01)  # main 3 + fallback 4 search fees
+    assert store.openai_free_used(budget.utc_today().isoformat())["mini"] == 7 * 1500
+    assert store.period_spent(start) == pytest.approx(13.0)  # Anthropic ledger untouched
+    fbr = s.groups[2]
+    assert set(fbr.pacing.kinds) == set(budget.KINDS) and fbr.budget_total == pytest.approx(4.5)
+
+
+def test_openai_also_out_behaves_as_v040(tmp_path):
+    store = state.PendingComments.load(tmp_path)
+    quota = main.OpenAIQuotaError("OpenAI quota/spend limit reached (HTTP 429, insufficient_quota)")
+    gs = fb_groups(store, Bot(main.AnthropicCreditError("credit balance too low")), Bot(quota))
+    gs[0].bot_factory = lambda k, t: Bot(quota)
+    s, _ = run_fb(store, gs)
+    assert s.exit_code == 1 and len(s.systemic) == 2
+
+
+def test_before_from_date_and_unset_vars_are_exactly_v040(tmp_path):
+    import inspect
+    sig = inspect.signature(runner.run).parameters
+    assert sig["only_urls"].default is None and sig["serial_first"].default is False
+    assert runner.Group.__dataclass_fields__["fallback"].default is None
+    for env, day in ((SPLIT, date(2026, 10, 31)), ({"OPENAI_API_KEY": "o"}, DAY)):
+        plan = budget.tournament_providers(env, day)
+        assert len({p for p, _ in plan.values()}) == 1  # cli takes the single-run path: no groups, no fallback
+    code, work, text = _precheck(tmp_path, SPLIT, datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc))
+    assert "改用" not in text.replace("起改用", "") and "備援" not in text
+    store = state.PendingComments.load(tmp_path)  # single-run path writes no provider log
+    asyncio.run(runner.run(mode="tournament", publish=True, bot_factory=lambda k, t: Bot(), client=FakeClient(),
+                           key_lookup_fn=lambda: budget.openai_lookup_from_store(SPLIT, store, DAY),
+                           version=main.VERSION, models={k: O_MODELS for k in budget.KINDS},
+                           prices={k: O_PRICE for k in budget.KINDS}, env=dict(SPLIT), tournaments=TOURNAMENTS,
+                           concurrency=1, store=store, today=DAY, now=NOW, provider="openai"))
+    assert not log_rows(tmp_path)

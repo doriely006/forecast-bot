@@ -1,6 +1,6 @@
 # forecast-bot
 
-v0.4.0. A low-cost, fully automated Metaculus bot for the Fall 2026 FutureEval tournament and MiniBench.
+v0.4.1. A low-cost, fully automated Metaculus bot for the Fall 2026 FutureEval tournament and MiniBench.
 Based on [Metaculus/metac-bot-template](https://github.com/Metaculus/metac-bot-template) at
 `096cb207d643da3090c4830cd828255bf18da2d5` (2026-10-15), forecasting-tools 0.3.4 (locked; `>=0.3.0,<0.4.0`),
 Python 3.12 on GitHub Actions. Spec: `docs/SPEC.md`. No human edits any individual forecast.
@@ -44,7 +44,16 @@ v0.4.0: `MAIN_LLM_PROVIDER` / `MINIBENCH_LLM_PROVIDER` (optional, each from its 
 tournament on another provider. Each provider then runs as its own group: own budget and pacing (counting
 only its tournament's questions), own ledger, own health probe. A provider's 401/402 or empty budget stops
 only its tournament and shows a yellow box while the other tournament keeps forecasting; red only when
-both are stopped. Adding `ANTHROPIC_API_KEY` without `LLM_PROVIDER` moves everything to Anthropic (key
+both are stopped.
+v0.4.1 fallback: when a tournament's own provider is unusable (budget below its stop line, 401/402 or a
+credit/spend-limit error mid-run, or a fatal health probe), the questions of that run not yet submitted
+are forecast in the same run on the global provider (`LLM_PROVIDER`), paced and booked on its ledger as
+when it served both tournaments; questions already submitted are not redone, and ordinary per-question
+failures do not trigger it. The first question on the per-tournament provider runs alone, so a dead provider
+costs one failing request per run; the next run tries it again. Summary and precheck show a yellow
+"<tournament> 這輪改用 <provider>" box with the reason and per-provider submitted counts. Every published
+MiniBench question appends `{"id","provider","model","date"}` to `.state/provider_log.jsonl` (kept by the
+state cache). If the global provider is unusable too, the job behaves as v0.4.0. Adding `ANTHROPIC_API_KEY` without `LLM_PROVIDER` moves everything to Anthropic (key
 order), so set `LLM_PROVIDER=openai` first.
 - The Anthropic path uses the official `anthropic` Python SDK (not litellm). Final forecasts:
   `claude-opus-5-5`, effort `ANTHROPIC_EFFORT` (default `medium`), server-side refusal fallback

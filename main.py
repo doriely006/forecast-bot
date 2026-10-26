@@ -50,7 +50,7 @@ import guards  # noqa: E402
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 
 # Model choice (explicit candidate lists, per-tournament config) lives in
 # budget.py so the light precheck step can use it without dependencies.
@@ -1059,12 +1059,13 @@ def provider_setup(provider: str, env: dict[str, str], ledger: Any) -> tuple[Any
 
 
 def make_group(kind: str, provider: str, env: dict[str, str], tournaments: list[tuple[str, Any]],
-               ledger: Any, client: Any) -> Any:
-    """v0.4.0: one tournament kind on its own provider (own env, ledger book, budget, probe)."""
+               ledger: Any, client: Any, solo: bool = True) -> Any:
+    """v0.4.0: one tournament kind on its own provider (own env, ledger book, budget, probe).
+    solo=False (v0.4.1 fallback): pace as the global provider does when it serves every tournament."""
     import budget
     import runner
 
-    genv = budget.provider_env(env, provider, [kind])
+    genv = budget.provider_env(env, provider, [kind] if solo else None)
     forecast_ids, cheap_id, prices, llms_for, key_lookup_fn, probe_fn = provider_setup(provider, genv, ledger)
     return runner.Group(
         kind=kind, provider=provider, env=genv,
@@ -1144,6 +1145,10 @@ def cli(argv: list[str] | None = None) -> int:
             result.notes = notes
         else:  # v0.4.0: each tournament on its own provider, budget and stop
             groups = [make_group(kind, plan[kind][0], env, tournaments, ledger, client) for kind in kinds]
+            base = budget.select_provider(env)
+            for g in groups:  # v0.4.1: provider unusable -> this run's unsent questions go to the global provider
+                if g.provider != base:
+                    g.fallback = (lambda k=g.kind: make_group(k, base, env, tournaments, ledger, client, solo=False))
             result = asyncio.run(runner.run_split(mode=args.mode, publish=publish, groups=groups, client=client,
                                                   version=VERSION, store=store, notes=notes))
         crash = ""
