@@ -157,6 +157,7 @@
 - 第一次真跑看 log 有無 "Health probe failed"（探測沒打過真 API；誤判失敗會把毒題計數撤回）。
 - README Technical 段除了止血那段，其餘仍有 v0.1.1 以前的描述，沒逐條對過 code；下次動 README 時順手對。
 - 開 BOT_ENABLED／PUBLISH 前，user 的 Test Bot Summary 截圖要先給主 session 看過（README 第 6–8 步已寫）。
+- **11-08 複查 Haiku 研究品質（user 10-27 拍板：先跑一週）**：抽 MiniBench 11-01～07 anthropic 題（`.state/provider_log.jsonl`）的 Metaculus 說明，看 Haiku 摘要尾的 Sources：日期新不新、對不對題、有沒有漏題目關鍵事件。常抓舊聞／錯題 -> 研究段 `ANTHROPIC_RESEARCH_MODEL` 換 `claude-sonnet-5-5`（$2／$10，Haiku 20 倍單價），先報每題成本變化再換。
 
 ## v0.2 清單
 - **MiniBench Claude 對照組（user 10-17 拍板）**：第一輪 MiniBench 結算後（約 11-01，C6 切便宜設定那天），MiniBench 的最終預測 model 換成 Claude（OpenRouter 上的 Anthropic 款），正賽維持 GPT。跑滿一輪 MiniBench 後，比兩邊非 metac 名次（standings.py），Claude 贏就提案正賽換。user 想押 Claude；參賽表單 models 欄已寫兩家＋這個計畫。
