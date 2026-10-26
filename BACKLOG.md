@@ -106,6 +106,7 @@
 - SDK 實讀：`publish_report_to_metaculus` 先 POST forecast 再 POST `/comments/create/`（`is_private=True`）；explanation 必須以 `#` 開頭；`get_all_open_questions_from_tournament` 只抓第一頁 100 題。
 
 ### 下一輪開工先做
+- 🔴 standings 從沒成功過：①`due()` 只認 00:00–00:20 UTC，GitHub 排程實際 2–5 小時一輪，上線後 0 次命中；②10-26 手動 run 40335681264：users/me 過了，兩榜都 `讀不到排行榜（AttributeError）`＝`resolve_project`／`parse_entries` 對真回應形狀錯（leaderboard API 要 token，本機無 token，形狀未知）；③輸出沒印 bot username。修法：due 改「當日第一輪」（state 記日期）、印 username、parse 失敗時印 top-level keys。
 - v0.3.0 OpenAI：已上線（10-23 起 PUBLISH=1）；tool token 假設 10-26 已校準（見收工日誌）。剩：校正 `O_*` token 假設（Usage 頁 472K tokens／153 requests 可當起點）；11 月首次週檢對本機記帳 vs Usage 頁。
 - v0.2.0 Anthropic：user 放 `ANTHROPIC_API_KEY` secret（不設 OPENROUTER_API_KEY 就自動走 Anthropic）、評估本期已花多少再設 `ANTHROPIC_BUDGET_USD` -> 手動跑 Test Bot（PUBLISH 未設）-> 對 Summary 的本期花費 vs Console 實際用量、log 有無 refusal／web search error／max_tokens 警告，校正 `A_*` token 假設。
 - user 放好 secrets、確認 auto top-up 關閉、填表單後：手動跑 Test Bot（PUBLISH 未設）-> 看 Summary 有無紅框、花費、log 裡 web search 有沒有引用來源。過了就設 BOT_ENABLED=1＋PUBLISH=1。
