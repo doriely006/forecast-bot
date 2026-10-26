@@ -2,6 +2,15 @@
 
 ## 收工日誌
 
+### 2026-10-26 v0.3.2 standings
+- `due()` 改「當日第一輪」：日期存 `.state/standings_day`（YYYY-MM-DD，UTC）；缺檔／讀不到＝跑（fail-open）；workflow_dispatch 永遠跑。
+- `mark_done` 在 fetch 前寫日期並 touch `.state/changed`（precheck 已先 clear_changed，cache restore 在 precheck 之前，順序不用動）-> 尾端 cache/save 存新 entry。標在 fetch 前＝榜讀失敗也不會每 20 分鐘重打。
+- Summary 加 `- bot 帳號：<name>`。
+- 讀榜失敗印 `Class: msg`（≤200）＋`shape_of`（top type、top keys、第一個 list 欄位的長度與首元素 keys，只有型別／key 名、不印值），每板 ≤400 字。users/me body 不印。
+- 版號 pyproject／main／precheck／README／test 斷言 -> 0.3.2。yaml 沒動。
+- 測試：pytest 全綠（見 commit）；新增 once-a-day、fail-open、username、shape 不洩值。
+- 沒驗：真回應形狀（下次 workflow_dispatch 看 log）。
+
 ### 2026-10-26 OpenAI 帳單校準
 - user 截 Usage 頁：10 月實付 $0.35（org 上限 $5.00），35 web search requests，472,836 tokens／153 requests。本機記帳同期 $0.75。
 - $0.35＝35×$0.01 -> 用 tool 的請求 token 也走免費額度，只收 search 費；v0.3.0「tool 請求整筆付費」假設證偽。
@@ -106,7 +115,7 @@
 - SDK 實讀：`publish_report_to_metaculus` 先 POST forecast 再 POST `/comments/create/`（`is_private=True`）；explanation 必須以 `#` 開頭；`get_all_open_questions_from_tournament` 只抓第一頁 100 題。
 
 ### 下一輪開工先做
-- 🔴 standings 從沒成功過：①`due()` 只認 00:00–00:20 UTC，GitHub 排程實際 2–5 小時一輪，上線後 0 次命中；②10-26 手動 run 40335681264：users/me 過了，兩榜都 `讀不到排行榜（AttributeError）`＝`resolve_project`／`parse_entries` 對真回應形狀錯（leaderboard API 要 token，本機無 token，形狀未知）；③輸出沒印 bot username。修法：due 改「當日第一輪」（state 記日期）、印 username、parse 失敗時印 top-level keys。
+- 🔴 standings v0.3.2 已修 due（當日第一輪）、印 username、失敗印形狀；剩：手動跑一次 workflow_dispatch，從 Summary 的「回應形狀」依真 shape 修 `resolve_project`／`parse_entries`，確認名次讀得到；隔天看排程是否只跑一次。
 - v0.3.0 OpenAI：已上線（10-23 起 PUBLISH=1）；tool token 假設 10-26 已校準（見收工日誌）。剩：校正 `O_*` token 假設（Usage 頁 472K tokens／153 requests 可當起點）；11 月首次週檢對本機記帳 vs Usage 頁。
 - v0.2.0 Anthropic：user 放 `ANTHROPIC_API_KEY` secret（不設 OPENROUTER_API_KEY 就自動走 Anthropic）、評估本期已花多少再設 `ANTHROPIC_BUDGET_USD` -> 手動跑 Test Bot（PUBLISH 未設）-> 對 Summary 的本期花費 vs Console 實際用量、log 有無 refusal／web search error／max_tokens 警告，校正 `A_*` token 假設。
 - user 放好 secrets、確認 auto top-up 關閉、填表單後：手動跑 Test Bot（PUBLISH 未設）-> 看 Summary 有無紅框、花費、log 裡 web search 有沒有引用來源。過了就設 BOT_ENABLED=1＋PUBLISH=1。

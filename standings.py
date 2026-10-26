@@ -20,9 +20,11 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 import budget
+import state as state_mod
 
 API_BASE = "https://www.metaculus.com/api"
 STOP_LOSS_MIN_RESOLVED = 40
@@ -88,6 +90,27 @@ def resolve_project(project: str, get: Callable[[str], Any], base: str) -> str:
     return str(get(f"{base}/projects/tournaments/{project}/")["id"])
 
 
+def shape_of(payload: Any, limit: int = 400) -> str:
+    """Types and key names only, never values (public repo logs)."""
+    parts = [f"top={type(payload).__name__}"]
+    if isinstance(payload, dict):
+        parts.append("keys=" + ",".join(str(k) for k in payload))
+        for k, v in payload.items():
+            if isinstance(v, (list, tuple)):
+                first = v[0] if v else None
+                if isinstance(first, dict):
+                    sub = "keys=" + ",".join(str(x) for x in first)
+                else:
+                    sub = "type=" + type(first).__name__
+                parts.append(f"first list field {k!r}: len={len(v)}, first element {sub}")
+                break
+    elif isinstance(payload, (list, tuple)):
+        first = payload[0] if payload else None
+        sub = "keys=" + ",".join(str(x) for x in first) if isinstance(first, dict) else "type=" + type(first).__name__
+        parts.append(f"len={len(payload)}, first element {sub}")
+    return "; ".join(parts)[:limit]
+
+
 def standings_lines(
     env: dict[str, str], get_json: Callable[..., Any] = budget.http_get_json
 ) -> list[str]:
@@ -95,22 +118,31 @@ def standings_lines(
     base = (env.get("METACULUS_API_BASE_URL") or API_BASE).rstrip("/")
     headers = {"Authorization": f"Token {token}"} if token else {}
 
+    seen: list[Any] = []
+
     def get(url: str) -> Any:
-        return get_json(url, headers, 30)
+        seen.append(None)
+        data = get_json(url, headers, 30)
+        seen[-1] = data
+        return data
 
     lines = ["", "### 排行榜（非 metac-* bot 裡的名次）"]
     try:
         me = env.get("BOT_USERNAME") or get(f"{base}/users/me")["username"]
     except Exception as e:
         return lines + [f"- 讀不到 bot 帳號名稱（{e.__class__.__name__}）；可設 repo variable BOT_USERNAME"]
+    lines.append(f"- bot 帳號：{me}")
     boards = [("正賽", env.get("STANDINGS_MAIN_PROJECT") or "33121", True),
               ("MiniBench", env.get("STANDINGS_MINIBENCH_PROJECT") or "minibench", False)]
     for label, project, is_main in boards:
+        seen.clear()
         try:
             pid = resolve_project(project, get, base)
             entries = parse_entries(get(f"{base}/leaderboards/project/{pid}/"))
         except Exception as e:
-            lines.append(f"- {label}：讀不到排行榜（{e.__class__.__name__}）")
+            detail = f"{e.__class__.__name__}: {e}"[:200]
+            shape = shape_of(seen[-1]) if seen and seen[-1] is not None else "no response body"
+            lines.append(f"- {label}：讀不到排行榜（{detail}）；回應形狀 {shape}"[:400])
             continue
         found = non_metac_standing(entries, me)
         if found is None:
@@ -124,15 +156,39 @@ def standings_lines(
     return lines
 
 
-def due(env: dict[str, str], now: datetime) -> bool:
-    """Once a day (the first run after 00:00 UTC), or on a manual run."""
-    return env.get("GITHUB_EVENT_NAME") == "workflow_dispatch" or (now.hour == 0 and now.minute < 20)
+DAY_FILE = "standings_day"
+
+
+def due(env: dict[str, str], now: datetime, directory: Path | None = None) -> bool:
+    """First run of the UTC day (date kept in .state/standings_day), or a manual run.
+    Fail-open: if the stored date cannot be read, run."""
+    if env.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+        return True
+    try:
+        last = ((directory or state_mod.state_dir(env)) / DAY_FILE).read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return True
+    return last != now.strftime("%Y-%m-%d")
+
+
+def mark_done(env: dict[str, str], now: datetime, directory: Path | None = None) -> None:
+    """Record today's date and touch .state/changed so the workflow saves the cache."""
+    d = directory or state_mod.state_dir(env)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        (d / DAY_FILE).write_text(now.strftime("%Y-%m-%d"), encoding="utf-8")
+        (d / "changed").write_text("1", encoding="utf-8")
+    except OSError:
+        pass
 
 
 def main() -> int:
     env = dict(os.environ)
-    if "--daily" in sys.argv and not due(env, datetime.now(timezone.utc)):
-        return 0
+    now = datetime.now(timezone.utc)
+    if "--daily" in sys.argv:
+        if not due(env, now):
+            return 0
+        mark_done(env, now)  # before the fetch: a failing board must not retry every 20 minutes
     text = "\n".join(standings_lines(env)) + "\n"
     print(text)
     if env.get("GITHUB_STEP_SUMMARY"):

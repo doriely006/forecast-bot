@@ -50,7 +50,40 @@ def test_unreadable_leaderboard_is_reported_not_raised():
     assert lines.count("讀不到排行榜") == 2
 
 
-def test_runs_once_a_day_or_manually():
-    assert standings.due({}, datetime(2026, 11, 1, 0, 7, tzinfo=timezone.utc))
-    assert not standings.due({}, datetime(2026, 11, 1, 0, 27, tzinfo=timezone.utc))
-    assert standings.due({"GITHUB_EVENT_NAME": "workflow_dispatch"}, datetime(2026, 11, 1, 13, 0))
+def test_runs_once_a_day_or_manually(tmp_path):
+    env = {"STATE_DIR": str(tmp_path / "st")}
+    d1 = datetime(2026, 11, 1, 3, 7, tzinfo=timezone.utc)
+    assert standings.due(env, d1)  # nothing stored: fail-open
+    standings.mark_done(env, d1)
+    assert (tmp_path / "st" / "changed").exists()  # makes the workflow save the cache
+    assert not standings.due(env, datetime(2026, 11, 1, 13, 7, tzinfo=timezone.utc))
+    assert standings.due(env, datetime(2026, 11, 2, 2, 47, tzinfo=timezone.utc))
+    assert standings.due({**env, "GITHUB_EVENT_NAME": "workflow_dispatch"}, d1)
+
+
+def test_due_fails_open_on_unreadable_state(tmp_path):
+    (tmp_path / "standings_day").write_bytes(b"\xff\xfe\x00")
+    assert standings.due({"STATE_DIR": str(tmp_path)}, datetime(2026, 11, 1, 5, 0, tzinfo=timezone.utc))
+
+
+def test_username_line():
+    lines = standings.standings_lines({"METACULUS_TOKEN": "t"}, fake_get)
+    assert f"- bot 帳號：{ME}" in lines
+
+
+def test_bad_payload_dumps_shape_without_values():
+    secret = "SECRET-VALUE-123"
+
+    def odd(url, headers=None, timeout=30):
+        if url.endswith("/users/me"):
+            return {"username": ME, "email": secret}
+        if "/projects/tournaments/" in url:
+            return {"id": 5, "note": secret}
+        return {"results": [secret, secret], "meta": {"x": secret}}  # strings, not dicts -> AttributeError
+
+    lines = "\n".join(standings.standings_lines({"METACULUS_TOKEN": "t"}, odd))
+    assert lines.count("讀不到排行榜（AttributeError") == 2
+    assert "top=dict" in lines and "keys=results,meta" in lines and "first element type=str" in lines
+    assert secret not in lines and "email" not in lines
+    assert all(len(x) <= 400 for x in lines.splitlines())
+    assert "top=list" in standings.shape_of([{"a": secret}]) and secret not in standings.shape_of([{"a": secret}])
