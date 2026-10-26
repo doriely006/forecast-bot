@@ -86,7 +86,7 @@ def test_version_matches_pyproject():
 
     py = (ROOT / "pyproject.toml").read_text()
     version = re.search(r'^version = "([^"]+)"', py, re.M).group(1)
-    assert version == main.VERSION == precheck.VERSION == "0.3.3"
+    assert version == main.VERSION == precheck.VERSION == "0.4.0"
 
 
 def test_workflows_locked_down():  # B6, B10, override 3

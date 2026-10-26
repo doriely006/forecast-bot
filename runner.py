@@ -186,6 +186,8 @@ class RunResult:
     deferred: list[dict[str, Any]] = field(default_factory=list)  # OpenAI: free tokens used up, closes > 30 h away
     paid_overflow: int = 0  # OpenAI: questions answered past the free allowance (paid at standard rates)
     plan_reason: str = ""
+    notes: list[str] = field(default_factory=list)  # v0.4.0: yellow notes (per-tournament provider fallback)
+    forecast_keys: set[str] = field(default_factory=set)  # v0.4.0: stop-loss prune set of this run
 
     def count(self, *statuses: str) -> int:
         return sum(o.status in statuses for o in self.outcomes)
@@ -276,6 +278,7 @@ async def run(
     now: datetime | None = None,
     probe_fn: Callable[[], Awaitable[Any]] | None = None,
     provider: str | None = None,
+    prune_failures: bool = True,
 ) -> RunResult:
     env = dict(os.environ) if env is None else env
     provider = provider or budget.select_provider(env)
@@ -331,7 +334,7 @@ async def run(
 
     to_forecast.sort(key=_close_key)  # closing soonest first
     if store is not None and mode == "tournament":
-        to_forecast = _drop_failing(store, to_forecast, env, result, now)
+        to_forecast = _drop_failing(store, to_forecast, env, result, now, prune_failures)
     open_new = {k: 0 for k in budget.KINDS}
     for name, _ in to_forecast:
         open_new[budget.kind_of(name)] += 1
@@ -352,7 +355,7 @@ async def run(
         ]
     elif to_forecast:
         assert result.pacing is not None
-        bots = {k: bot_factory(k, result.pacing.kinds[k].tier) for k in budget.KINDS}
+        bots = {k: bot_factory(k, kp.tier) for k, kp in result.pacing.kinds.items()}
         sem = asyncio.Semaphore(concurrency)
         stop = asyncio.Event()
 
@@ -368,7 +371,7 @@ async def run(
 
         result.outcomes = list(await asyncio.gather(*[one(n, q) for n, q in to_forecast]))
         if probe_fn is not None and _upstream_suspect(result.outcomes):
-            await _health_probe(probe_fn, result, prices[budget.KINDS[0]][1], store, stop)
+            await _health_probe(probe_fn, result, next(iter(prices.values()))[1], store, stop)
 
     result.outcomes += closing
     after = key_lookup_fn().info if (decision.may_call_llm and to_forecast) else lookup.info
@@ -440,10 +443,11 @@ def _upstream_suspect(outcomes: list[Outcome]) -> bool:
 
 
 def _drop_failing(store: Any, to_forecast: list[tuple[str, Any]], env: dict[str, str],
-                  result: RunResult, now: datetime | None = None) -> list[tuple[str, Any]]:
+                  result: RunResult, now: datetime | None = None, prune: bool = True) -> list[tuple[str, Any]]:
     """Stop-loss: questions that failed MAX_QUESTION_FAILED_RUNS runs in a row get no LLM call,
     until SKIP_COOLDOWN_HOURS after their last attempt (then one more try)."""
-    if not result.fetch_errors:  # a tournament we could not read must not wipe its counts
+    result.forecast_keys = {_qkey(q) for _, q in to_forecast}
+    if prune and not result.fetch_errors:  # a tournament we could not read must not wipe its counts
         store.prune_failures({_qkey(q) for _, q in to_forecast})
     result.fail_limit = state_mod.max_failed_runs(env)
     result.cooldown_hours = state_mod.skip_cooldown_hours(env)
@@ -604,10 +608,15 @@ def render_skipped(skipped: list[dict[str, Any]], limit: int | None = None, cool
     return ["", "> [!WARNING]", f"> {head}", *rows, ""]
 
 
-def render_summary(r: RunResult, with_header: bool = True) -> str:
-    lines: list[str] = [precheck.summary_header(r.publish), ""] if with_header else []
-    lines += [f"## forecast-bot v{r.version}：預測", ""]
-    lines.append(f"- 模式：`{r.mode}`" + ("" if r.publish else "（DRY RUN，什麼都不送）"))
+def render_summary(r: RunResult, with_header: bool = True, section: str | None = None) -> str:
+    """section (v0.4.0): one tournament group inside a split summary -> `### section` heading; the
+    header, mode line, red blocks, stop-loss list and question listing are left to the split summary."""
+    if section is not None:
+        lines: list[str] = ["", f"### {section}", ""]
+    else:
+        lines = [precheck.summary_header(r.publish), ""] if with_header else []
+        lines += [f"## forecast-bot v{r.version}：預測", ""]
+        lines.append(f"- 模式：`{r.mode}`" + ("" if r.publish else "（DRY RUN，什麼都不送）"))
     if r.models:
         cheap = next(iter(r.models.values()))[1]
         per = []
@@ -615,8 +624,10 @@ def render_summary(r: RunResult, with_header: bool = True) -> str:
             n = f" x{r.pacing.kinds[k].tier.forecasts}" if r.pacing else ""
             per.append(f"{k} `{fid}`{n}")
         lines.append(f"- 模型：{'；'.join(per)}；研究／解析 `{cheap}`＋原生搜尋；AskNews {_asknews()}")
-    for reason in r.systemic:
+    for reason in (r.systemic if section is None else []):
         lines += _block("CAUTION", f"**停止／系統性問題**：{reason}")
+    for note in r.notes:
+        lines += _block("WARNING", note)
     if r.upstream_suspect:
         lines += _block("CAUTION", "**疑似上游故障（探測失敗），本輪不計失敗**：這輪試了 "
                         f"{r.failed} 題全部失敗，健康探測也失敗（{r.probe_error}），失敗次數沒有累計，下一輪照常重試。")
@@ -628,7 +639,7 @@ def render_summary(r: RunResult, with_header: bool = True) -> str:
     if r.fetch_errors and r.open_counts and not r.fetch_auth_error:
         for err in r.fetch_errors:
             lines += _block("WARNING", f"**抓題失敗（另一邊照跑）**：{err}")
-    if with_header:  # with a precheck step above, it already lists these
+    if with_header and section is None:  # with a precheck step above, it already lists these
         lines += render_skipped(r.skipped_failing, r.fail_limit, r.cooldown_hours)
     comment_failed = r.count("comment_failed")
     if comment_failed:
@@ -667,20 +678,27 @@ def render_summary(r: RunResult, with_header: bool = True) -> str:
         f"- {r.label()} 剩餘：{_money(r.remaining_after)}",
     ]
     bad = [o for o in r.outcomes if o.status in ("failed", "comment_failed")]
+    sub = "####" if section is not None else "###"
     if bad:
-        lines += ["", "### 失敗的題目"]
+        lines += ["", f"{sub} 失敗的題目"]
         lines += [f"- [{o.title}]({o.url})（{o.status}）：{o.detail}" for o in bad]
     done = [o for o in r.outcomes if o.status in ("submitted", "comment_failed", "dry_run")]
     if done:
-        lines += ["", "### 這輪預測的題目"]
+        lines += ["", f"{sub} 這輪預測的題目"]
         lines += [f"- [{o.title}]({o.url})（{o.tournament}，約 {_money(o.cost)}）" for o in done]
-    if with_header and r.windows:  # no precheck listing above (Test Bot): print open/close times here (C4)
-        lines += ["", "<details><summary>開放中的題目（開放／截止時間，UTC）</summary>", "",
-                  "| tournament | question | opens | closes |", "|---|---|---|---|"]
-        for t, title, url, op, cl in r.windows:
-            lines.append(f"| {t} | [{title.replace('|', '/')}]({url}) | {op} | {cl} |")
-        lines += ["", "</details>"]
+    if with_header and section is None:  # no precheck listing above (Test Bot): print open/close times here (C4)
+        lines += _windows(r.windows)
     return "\n".join(lines) + "\n"
+
+
+def _windows(windows: list[tuple[str, str, str, str, str]]) -> list[str]:
+    if not windows:
+        return []
+    lines = ["", "<details><summary>開放中的題目（開放／截止時間，UTC）</summary>", "",
+             "| tournament | question | opens | closes |", "|---|---|---|---|"]
+    for t, title, url, op, cl in windows:
+        lines.append(f"| {t} | [{title.replace('|', '/')}]({url}) | {op} | {cl} |")
+    return lines + ["", "</details>"]
 
 
 def render_crash(version: str, publish: bool, reason: str, with_header: bool = True) -> str:
@@ -697,3 +715,126 @@ def write_summary(text: str, env: dict[str, str] | None = None) -> None:
     if path:
         with open(path, "a", encoding="utf-8") as f:
             f.write(text)
+
+
+# ------------------------------------------------------- v0.4.0 per-tournament provider
+
+
+@dataclass
+class Group:
+    """One tournament kind on its own provider: own budget, pacing, ledger, stop event and probe."""
+    kind: str
+    provider: str
+    env: dict[str, str]  # budget.provider_env(env, provider, [kind])
+    tournaments: list[tuple[str, int | str]]
+    key_lookup_fn: Callable[[], budget.KeyLookup]
+    bot_factory: Callable[[str, budget.Tier], Any]
+    models: dict[str, tuple[str, str]]
+    prices: dict[str, tuple[tuple[float, float], tuple[float, float]]]
+    probe_fn: Callable[[], Awaitable[Any]] | None = None
+
+
+def provider_problems(r: RunResult) -> list[str]:
+    """Run-wide provider trouble of one group: 401/402 mid-run, or no usable budget when LLM work was due."""
+    out = [r.fatal] if r.fatal else []
+    if r.llm_needed and r.decision.systemic:
+        out.append(f"{r.label()}: {r.decision.reason}")
+    return out
+
+
+@dataclass
+class SplitResult:
+    version: str
+    mode: str
+    publish: bool
+    groups: list[RunResult] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    crashes: list[str] = field(default_factory=list)  # a group whose run raised (a bug, not a provider error)
+
+    @property
+    def outcomes(self) -> list[Outcome]:
+        return [o for r in self.groups for o in r.outcomes]
+
+    @property
+    def healthy(self) -> bool:
+        """At least one group ran without provider trouble: the others' trouble is then only yellow."""
+        return any(not provider_problems(r) for r in self.groups)
+
+    @property
+    def demoted(self) -> list[tuple[RunResult, str]]:
+        if not self.healthy:
+            return []
+        return [(r, p) for r in self.groups for p in provider_problems(r)]
+
+    @property
+    def systemic(self) -> list[str]:
+        out = list(self.crashes)
+        if not self.healthy:
+            out += [p for r in self.groups for p in provider_problems(r)]
+        errors = [e for r in self.groups for e in r.fetch_errors]
+        opened = any(r.open_counts for r in self.groups)
+        if any(r.fetch_auth_error for r in self.groups) or (errors and not opened):
+            out.append("could not load questions: " + "; ".join(errors))
+        # a group's run-wide 401/402 is judged above, not as "every question failed"
+        attempted = [o for o in self.outcomes if o.status not in NOT_ATTEMPTED and not o.fatal]
+        if attempted and all(o.status == "failed" for o in attempted):
+            out.append(f"every attempted question failed ({len(attempted)})")
+        published = [o for o in self.outcomes if o.status in ("submitted", "comment_failed")]
+        if published and all(o.status == "comment_failed" for o in published):
+            out.append("no comment could be sent")
+        return out
+
+    @property
+    def exit_code(self) -> int:
+        return 1 if self.systemic else 0
+
+
+def _fresh_write_ahead(store: Any) -> None:
+    """A group's stop-loss rollback (fatal / outage probe) must only take back its own +1s."""
+    wa = getattr(store, "_wa", None)
+    if isinstance(wa, dict):
+        wa.clear()
+
+
+async def run_split(*, mode: str, publish: bool, groups: list[Group], client: Any, version: str,
+                    store: Any = None, today: date | None = None, now: datetime | None = None,
+                    concurrency: int = 3, notes: list[str] | None = None) -> SplitResult:
+    """Groups run one after another (main first), each a full `run` on its own provider."""
+    split = SplitResult(version, mode, publish, notes=list(notes or []))
+    for g in groups:
+        if store is not None:
+            _fresh_write_ahead(store)
+        try:
+            r = await run(mode=mode, publish=publish, bot_factory=g.bot_factory, client=client,
+                          key_lookup_fn=g.key_lookup_fn, version=version, models=g.models, prices=g.prices,
+                          env=g.env, tournaments=g.tournaments, concurrency=concurrency, store=store,
+                          today=today, now=now, probe_fn=g.probe_fn, provider=g.provider, prune_failures=False)
+        except Exception as e:
+            split.crashes.append(f"{g.kind}（{g.provider}）沒跑完：{e.__class__.__name__}: {str(e)[:300]}")
+            continue
+        split.groups.append(r)
+    if store is not None and mode == "tournament" and split.groups and not split.crashes \
+            and not any(r.fetch_errors for r in split.groups):
+        store.prune_failures(set().union(*(r.forecast_keys for r in split.groups)))
+    return split
+
+
+def render_split_summary(s: SplitResult, with_header: bool = True) -> str:
+    lines: list[str] = [precheck.summary_header(s.publish), ""] if with_header else []
+    lines += [f"## forecast-bot v{s.version}：預測", ""]
+    lines.append(f"- 模式：`{s.mode}`" + ("" if s.publish else "（DRY RUN，什麼都不送）"))
+    lines.append("- 各賽事分開跑：" + "；".join(f"{'、'.join(r.models)} {r.provider}" for r in s.groups))
+    for reason in s.systemic:
+        lines += _block("CAUTION", f"**停止／系統性問題**：{reason}")
+    for r, reason in s.demoted:
+        lines += _block("WARNING", f"**{'、'.join(r.models)}（{r.label()}）這輪停了，另一個賽事照跑**：{reason}")
+    for note in s.notes:
+        lines += _block("WARNING", note)
+    if with_header and s.groups:
+        skipped = [x for r in s.groups for x in r.skipped_failing]
+        lines += render_skipped(skipped, s.groups[0].fail_limit, s.groups[0].cooldown_hours)
+    for r in s.groups:
+        lines += render_summary(r, with_header=False, section=f"{'、'.join(r.models)}：{r.provider}").rstrip("\n").split("\n")
+    if with_header:
+        lines += _windows([w for r in s.groups for w in r.windows])
+    return "\n".join(lines) + "\n"

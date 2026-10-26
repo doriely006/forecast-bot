@@ -50,7 +50,7 @@ import guards  # noqa: E402
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
-VERSION = "0.3.3"
+VERSION = "0.4.0"
 
 # Model choice (explicit candidate lists, per-tournament config) lives in
 # budget.py so the light precheck step can use it without dependencies.
@@ -1023,6 +1023,60 @@ def make_bot(forecast_id: str, cheap_id: str, forecasts: int, client: Any,
     )
 
 
+def provider_setup(provider: str, env: dict[str, str], ledger: Any) -> tuple[Any, ...]:
+    """-> (forecast model per kind, cheap model, prices, llms_for(kind), key_lookup_fn, probe_fn) for one
+    provider. `env` is already the provider's (budget.provider_env); `ledger()` returns the state store."""
+    import budget
+
+    if provider == "anthropic":  # v0.2.0
+        import anthropic
+
+        forecast_ids, cheap_id, prices = budget.provider_prices(env)
+        book = ledger()
+        record = make_spend_recorder(book, env)
+        aclient = anthropic.AsyncAnthropic(max_retries=2, timeout=600)
+        llms_for = lambda kind: build_anthropic_llms(forecast_ids[kind], cheap_id, aclient, env, record)  # noqa: E731
+        key_lookup_fn = lambda: budget.anthropic_lookup_from_store(env, book)  # noqa: E731
+        probe_fn = make_anthropic_probe(cheap_id, aclient, record, env)
+    elif provider == "openai":  # v0.3.0
+        import openai
+
+        forecast_ids, cheap_id, prices = budget.provider_prices(env)
+        book = ledger()
+        orecord = make_openai_recorder(book, env)
+        oclient = openai.AsyncOpenAI(max_retries=2, timeout=600)
+        llms_for = lambda kind: build_openai_llms(forecast_ids[kind], cheap_id, oclient, env, orecord)  # noqa: E731
+        key_lookup_fn = lambda: budget.openai_lookup_from_store(env, book)  # noqa: E731
+        probe_fn = make_openai_probe(cheap_id, oclient, orecord)
+    else:
+        models = budget.fetch_models()
+        forecast_ids, cheap_id, prices = budget.provider_prices(env, models)
+        register_prices_with_litellm(prices)
+        llms_for = lambda kind: build_llms(forecast_ids[kind], cheap_id)  # noqa: E731
+        key_lookup_fn = lambda: budget.fetch_key_info(env.get("OPENROUTER_API_KEY"))  # noqa: E731
+        probe_fn = make_probe(cheap_id)
+    return forecast_ids, cheap_id, prices, llms_for, key_lookup_fn, probe_fn
+
+
+def make_group(kind: str, provider: str, env: dict[str, str], tournaments: list[tuple[str, Any]],
+               ledger: Any, client: Any) -> Any:
+    """v0.4.0: one tournament kind on its own provider (own env, ledger book, budget, probe)."""
+    import budget
+    import runner
+
+    genv = budget.provider_env(env, provider, [kind])
+    forecast_ids, cheap_id, prices, llms_for, key_lookup_fn, probe_fn = provider_setup(provider, genv, ledger)
+    return runner.Group(
+        kind=kind, provider=provider, env=genv,
+        tournaments=[t for t in tournaments if budget.kind_of(t[0]) == kind],
+        key_lookup_fn=key_lookup_fn,
+        bot_factory=lambda k, tier: make_bot(forecast_ids[k], cheap_id, tier.forecasts, client, llms_for(k)),
+        models={kind: (forecast_ids[kind], cheap_id)},
+        prices={kind: (prices[forecast_ids[kind]], prices[cheap_id])},
+        probe_fn=probe_fn,
+    )
+
+
 def cli(argv: list[str] | None = None) -> int:
     import budget
     import precheck
@@ -1051,63 +1105,55 @@ def cli(argv: list[str] | None = None) -> int:
     crash = "stopped before the run finished"
     try:
         check_environment(strict=True)
-        provider = budget.select_provider(env)
         client = MetaculusClient()
         # Tournament runs (dry or not) keep the failure counts; only publishing stores comments.
         store = state.PendingComments.load(state.state_dir(env)) if args.mode == "tournament" else None
-        if provider == "anthropic":  # v0.2.0
-            import anthropic
+        loaded: list[Any] = []
 
-            forecast_ids, cheap_id, prices = budget.provider_prices(env)
-            # the spend ledger lives in the same state file; Test Bot loads it only for the ledger
-            ledger = store if store is not None else state.PendingComments.load(state.state_dir(env))
-            record = make_spend_recorder(ledger, env)
-            aclient = anthropic.AsyncAnthropic(max_retries=2, timeout=600)
-            llms_for = lambda kind: build_anthropic_llms(forecast_ids[kind], cheap_id, aclient, env, record)  # noqa: E731
-            key_lookup_fn = lambda: budget.anthropic_lookup_from_store(env, ledger)  # noqa: E731
-            probe_fn = make_anthropic_probe(cheap_id, aclient, record, env)
-        elif provider == "openai":  # v0.3.0
-            import openai
+        def ledger() -> Any:  # the spend ledger lives in the same state file; Test Bot loads it only for the ledger
+            if not loaded:
+                loaded.append(store if store is not None else state.PendingComments.load(state.state_dir(env)))
+            return loaded[0]
 
-            forecast_ids, cheap_id, prices = budget.provider_prices(env)
-            ledger = store if store is not None else state.PendingComments.load(state.state_dir(env))
-            orecord = make_openai_recorder(ledger, env)
-            oclient = openai.AsyncOpenAI(max_retries=2, timeout=600)
-            llms_for = lambda kind: build_openai_llms(forecast_ids[kind], cheap_id, oclient, env, orecord)  # noqa: E731
-            key_lookup_fn = lambda: budget.openai_lookup_from_store(env, ledger)  # noqa: E731
-            probe_fn = make_openai_probe(cheap_id, oclient, orecord)
-        else:
-            models = budget.fetch_models()
-            forecast_ids, cheap_id, prices = budget.provider_prices(env, models)
-            register_prices_with_litellm(prices)
-            llms_for = lambda kind: build_llms(forecast_ids[kind], cheap_id)  # noqa: E731
-            key_lookup_fn = lambda: budget.fetch_key_info(env.get("OPENROUTER_API_KEY"))  # noqa: E731
-            probe_fn = make_probe(cheap_id)
-        result = asyncio.run(
-            runner.run(
-                mode=args.mode,
-                publish=publish,
-                bot_factory=lambda kind, tier: make_bot(
-                    forecast_ids[kind], cheap_id, tier.forecasts, client, llms_for(kind)
-                ),
-                client=client,
-                key_lookup_fn=key_lookup_fn,
-                version=VERSION,
-                models={k: (forecast_ids[k], cheap_id) for k in budget.KINDS},
-                prices={k: (prices[forecast_ids[k]], prices[cheap_id]) for k in budget.KINDS},
-                env=env,
-                store=store,
-                probe_fn=probe_fn,
-                provider=provider,
+        tournaments = runner.tournaments_for_mode(args.mode)
+        kinds = list(dict.fromkeys(budget.kind_of(name) for name, _ in tournaments))
+        plan = budget.tournament_providers(env, budget.utc_today(), kinds)  # v0.4.0
+        notes = [note for _, note in plan.values() if note]
+        if len({p for p, _ in plan.values()}) == 1:  # one provider for everything (unset vars: as before)
+            provider = plan[kinds[0]][0]
+            penv = budget.provider_env(env, provider)
+            forecast_ids, cheap_id, prices, llms_for, key_lookup_fn, probe_fn = provider_setup(provider, penv, ledger)
+            result = asyncio.run(
+                runner.run(
+                    mode=args.mode,
+                    publish=publish,
+                    bot_factory=lambda kind, tier: make_bot(
+                        forecast_ids[kind], cheap_id, tier.forecasts, client, llms_for(kind)
+                    ),
+                    client=client,
+                    key_lookup_fn=key_lookup_fn,
+                    version=VERSION,
+                    models={k: (forecast_ids[k], cheap_id) for k in budget.KINDS},
+                    prices={k: (prices[forecast_ids[k]], prices[cheap_id]) for k in budget.KINDS},
+                    env=penv,
+                    store=store,
+                    probe_fn=probe_fn,
+                    provider=provider,
+                )
             )
-        )
+            result.notes = notes
+        else:  # v0.4.0: each tournament on its own provider, budget and stop
+            groups = [make_group(kind, plan[kind][0], env, tournaments, ledger, client) for kind in kinds]
+            result = asyncio.run(runner.run_split(mode=args.mode, publish=publish, groups=groups, client=client,
+                                                  version=VERSION, store=store, notes=notes))
         crash = ""
     except Exception as e:
         crash = f"{e.__class__.__name__}: {str(e)[:300]}"
     finally:
         # B1: the summary is written whatever happened.
         if result is not None and not crash:
-            runner.write_summary(runner.render_summary(result, with_header))
+            render = runner.render_split_summary if isinstance(result, runner.SplitResult) else runner.render_summary
+            runner.write_summary(render(result, with_header))
         else:
             runner.write_summary(runner.render_crash(VERSION, publish, crash, with_header))
     return result.exit_code if result is not None and not crash else 1

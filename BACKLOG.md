@@ -2,6 +2,20 @@
 
 ## 收工日誌
 
+### 2026-10-26 v0.4.0 每賽事分開 provider（MiniBench 11-01 起 Claude）
+- 新 var：`MAIN_LLM_PROVIDER`／`MINIBENCH_LLM_PROVIDER`（值同 LLM_PROVIDER）＋`*_LLM_PROVIDER_FROM`（UTC 日期，空＝即刻）。壞值／壞日期＝validate_switches 紅。
+- `budget.tournament_provider`：未設、日期前、或＝全域 -> `select_provider`；key 缺 -> 全域＋黃框 note。`provider_env(env, p, [kind])` 複製 env、只在 p≠全域時塞 LLM_PROVIDER、加內部 `_PACE_KINDS`；既有 lookup_for／provider_prices／pacing_horizon 全跟著走。
+- `pace`／`openai_plan`／`openai_pacing` 讀 `pace_kinds`：單一賽事時 spendable 全給它、不套 C6 minibench minimum、daily／later 只算該賽事題量。KINDS 全選＝原碼路徑。
+- 兩邊 provider 相同（含全未設）-> cli／precheck 走原單一路徑（`provider_setup` 抽出、內容不變）。不同 -> `runner.run_split`：main 先、minibench 後，各自 `run()`（自己的 decision／stop／fatal／probe／ledger）。
+- `SplitResult.systemic`：某組 provider 問題（fatal／預算 systemic）在另一組健康時降黃（`demoted`），兩組都壞才紅；「全部失敗」排除 fatal outcome；抓題紅照 B12 合併判。
+- 隔離補洞：組間清 `store._wa`（probe rollback_all 不吃別組 +1）；prune_failures 改 split 尾端用兩組 key 聯集（不然 main 會 prune 掉 minibench 計數）。
+- Summary：`### main：openai`／`### minibench：anthropic` 分節；precheck 每組縮排列 Provider／額度／本期或本月／配速；FROM 前有「預定 … 起改用」行。
+- dry run cap（DRY_RUN_LLM_MAX_QUESTIONS）在 split 時每組各算一次。
+- workflow：兩支加 4 個 var（tournament 放 job env）。README 變數表＋provider 段。版號 0.4.0。
+- 測試：200 passed（舊 176＋`tests/test_split_provider.py` 24）。
+- 估算：$15、stop 線 BUDGET_STOP_BELOW $3 -> 可用 $12；11-01 到 11-13 重置 48 題 -> $0.25／題 -> minimum（Opus x1，估 $0.17）。11-13 本機記帳換期歸零、會當又有 $15；若那 $15 是一次性儲值，實際額度用完會 402 -> MiniBench 黃框停、main 不受影響。
+- 沒驗：真 API 的 split run（只有 offline）；`.state` 同一 state.json 兩本帳並寫（同進程依序，無並發）。
+
 ### 2026-10-26 v0.3.3 standings 真形狀（run 40336280903）
 - bot 帳號＝midnightsharp-bot（users/me 實測）。`GET /leaderboards/project/<id>/` 回 list of leaderboard 物件（鍵含 is_primary_leaderboard／entries／bot_exclusion_status…），resolve_project 正常。
 - `parse_entries`：list -> 取 is_primary_leaderboard 為真者，否則第一個，讀其 `entries`；dict 舊路徑不變。
@@ -121,6 +135,7 @@
 - SDK 實讀：`publish_report_to_metaculus` 先 POST forecast 再 POST `/comments/create/`（`is_private=True`）；explanation 必須以 `#` 開頭；`get_all_open_questions_from_tournament` 只抓第一頁 100 題。
 
 ### 下一輪開工先做
+- v0.4.0 MiniBench Claude（11-01 自動切）——user 要設（順序重要）：①var `LLM_PROVIDER=openai`（**先設**；沒設就加 Anthropic key＝key 順序讓兩邊立刻全走 Anthropic）②secret `ANTHROPIC_API_KEY` ③var `ANTHROPIC_BUDGET_USD=15` ④var `MINIBENCH_LLM_PROVIDER=anthropic` ⑤var `MINIBENCH_LLM_PROVIDER_FROM=2026-11-01`。可選：`BUDGET_STOP_BELOW` 調低（Anthropic stop 線吃它，預設 $3＝$15 的 1/5 不能花）。設完當天 precheck 應出「minibench 預定 2026-11-01（UTC）起改用 anthropic」。11-01 手動跑一次：Summary 要有 `### main：openai`／`### minibench：anthropic` 兩節、MiniBench 本期花費有動、Console 用量對得上。
 - standings v0.3.3 真跑 OK（run 40336563878）：bot 帳號 midnightsharp-bot；正賽 33121 榜 359 筆、尚無本 bot（未有結算題）；MiniBench 榜 0 筆。剩：隔天確認排程只跑一次；本 bot 上榜後核對名次欄位讀法（entry 欄位對應未經真資料驗）。
 - v0.3.0 OpenAI：已上線（10-23 起 PUBLISH=1）；tool token 假設 10-26 已校準（見收工日誌）。剩：校正 `O_*` token 假設（Usage 頁 472K tokens／153 requests 可當起點）；11 月首次週檢對本機記帳 vs Usage 頁。
 - v0.2.0 Anthropic：user 放 `ANTHROPIC_API_KEY` secret（不設 OPENROUTER_API_KEY 就自動走 Anthropic）、評估本期已花多少再設 `ANTHROPIC_BUDGET_USD` -> 手動跑 Test Bot（PUBLISH 未設）-> 對 Summary 的本期花費 vs Console 實際用量、log 有無 refusal／web search error／max_tokens 警告，校正 `A_*` token 假設。
@@ -134,6 +149,7 @@
 ## v0.2 清單
 - **MiniBench Claude 對照組（user 10-17 拍板）**：第一輪 MiniBench 結算後（約 11-01，C6 切便宜設定那天），MiniBench 的最終預測 model 換成 Claude（OpenRouter 上的 Anthropic 款），正賽維持 GPT。跑滿一輪 MiniBench 後，比兩邊非 metac 名次（standings.py），Claude 贏就提案正賽換。user 想押 Claude；參賽表單 models 欄已寫兩家＋這個計畫。
   - 公平性：C6 原訂 11-01 後 MiniBench 走最便宜設定——對照組期間作廢，Claude 輪要跑跟正賽 GPT 同檔位（full），否則比較不算數。
+  - 10-26 改道（v0.4.0）：走 Anthropic 直連（`MINIBENCH_LLM_PROVIDER=anthropic`＋FROM 11-01），不走 OpenRouter；main 留 OpenAI 免費額度。預算 $15 -> 配速出 minimum（Opus x1）；GPT 那輪 MiniBench 實跑 lean x2 gpt-5.4，檔位本來就不相等 -> 比較是「整套設定 vs 整套設定」、受成本限制，不是同檔位對照，結果只當提示。
   - 輪次（10-17 主 session 提、user 問 Fable）：第 2 輪 Opus 5.5 full tier（約 $0.54／題）；第 3 輪 Fable 5.1 **minimum tier**（1 次預測，約 $0.28／題＝跟 terra full 同價），順便測「一次強預測 vs 五次中等預測平均」。Fable full tier 約 $1.25／題，不跑。單輪約 60 題、雜訊大，結果只當提示。
   - gpt-6-astra（$10/$50）比照 Fable：只跑 minimum tier（1 次預測）。
   - 價格出處：OpenRouter /api/v1/models 10-17 實查；單題成本＝budget.py 的 token 假設推算。申請額度表單填 300。

@@ -1,6 +1,6 @@
 # forecast-bot
 
-v0.3.3. A low-cost, fully automated Metaculus bot for the Fall 2026 FutureEval tournament and MiniBench.
+v0.4.0. A low-cost, fully automated Metaculus bot for the Fall 2026 FutureEval tournament and MiniBench.
 Based on [Metaculus/metac-bot-template](https://github.com/Metaculus/metac-bot-template) at
 `096cb207d643da3090c4830cd828255bf18da2d5` (2026-10-15), forecasting-tools 0.3.4 (locked; `>=0.3.0,<0.4.0`),
 Python 3.12 on GitHub Actions. Spec: `docs/SPEC.md`. No human edits any individual forecast.
@@ -40,6 +40,12 @@ A scheduled workflow runs every 20 minutes (`7,27,47 * * * *`).
 ## LLM provider (v0.2.0, v0.3.0)
 `LLM_PROVIDER` (`openrouter`, `anthropic` or `openai`) picks the provider. Unset: the first key that is set
 wins, in the order `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`.
+v0.4.0: `MAIN_LLM_PROVIDER` / `MINIBENCH_LLM_PROVIDER` (optional, each from its `_FROM` UTC date) put one
+tournament on another provider. Each provider then runs as its own group: own budget and pacing (counting
+only its tournament's questions), own ledger, own health probe. A provider's 401/402 or empty budget stops
+only its tournament and shows a yellow box while the other tournament keeps forecasting; red only when
+both are stopped. Adding `ANTHROPIC_API_KEY` without `LLM_PROVIDER` moves everything to Anthropic (key
+order), so set `LLM_PROVIDER=openai` first.
 - The Anthropic path uses the official `anthropic` Python SDK (not litellm). Final forecasts:
   `claude-opus-5-5`, effort `ANTHROPIC_EFFORT` (default `medium`), server-side refusal fallback
   (`fallbacks: "default"`, beta `server-side-fallback-2026-07-01`). Research: `claude-haiku-5-5` with the
@@ -104,6 +110,8 @@ Secrets: `METACULUS_TOKEN`, and one of `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`
 | `MC_MIN_PROB` | minimum probability per multiple-choice option | 0.01 |
 | `BOT_USERNAME` | bot account name for standings | looked up via `/users/me` |
 | `LLM_PROVIDER` | `openrouter`, `anthropic` or `openai` | by which key is set (OpenRouter, Anthropic, OpenAI) |
+| `MAIN_LLM_PROVIDER` / `MINIBENCH_LLM_PROVIDER` | provider for that tournament only (own budget, pacing, ledger, stop); its key missing = stays on the global choice with a yellow note | unset = `LLM_PROVIDER` / key order |
+| `MAIN_LLM_PROVIDER_FROM` / `MINIBENCH_LLM_PROVIDER_FROM` | UTC date (`YYYY-MM-DD`) from which the per-tournament provider applies | unset = at once |
 | `ANTHROPIC_BUDGET_USD` | Anthropic budget per credit period (USD) | 90 |
 | `ANTHROPIC_CREDIT_RESET_DAY` | day of month the Anthropic credit resets (1-28) | 13 |
 | `ANTHROPIC_FORECAST_MODEL` / `ANTHROPIC_RESEARCH_MODEL` | Anthropic model ids | `claude-opus-5-5` / `claude-haiku-5-5` |

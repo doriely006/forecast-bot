@@ -276,28 +276,33 @@ def pace(
     # v0.2.0: on Anthropic the money is per credit period, so pace until the next reset, not season end
     end = horizon_end or _date(env, "SEASON_END", "2027-01-01")
     days_left = max(0, (end - today).days)
+    sel = pace_kinds(env)
+    solo = len(sel) < len(KINDS)  # v0.4.0: this provider serves only `sel`; no split, no C6 minimum
     n = {
         k: max(1, open_unforecasted.get(k, 0), round(days_left * questions_per_day(env, k)))
-        for k in KINDS
+        for k in sel
     }
     stop_below = _env_float(env, "BUDGET_STOP_BELOW", 3.0)
     spendable = max(0.0, remaining - _env_float(env, "BUDGET_RESERVE", stop_below))
     after_split = today >= _date(env, "BUDGET_SPLIT_DATE", "2026-11-01")
-    if after_split:
+    if solo:
+        each = spendable / sum(n.values())
+        per_q = {k: each for k in sel}
+    elif after_split:
         share = min(1.0, max(0.0, _env_float(env, "MAIN_BUDGET_SHARE", 0.8)))
         per_q = {"main": spendable * share / n["main"], "minibench": spendable * (1 - share) / n["minibench"]}
     else:
         both = spendable / (n["main"] + n["minibench"])
         per_q = {"main": both, "minibench": both}
     kinds: dict[str, KindPace] = {}
-    for k in KINDS:
+    for k in sel:
         fp, cp = prices[k]
-        if after_split and k == "minibench":
+        if after_split and k == "minibench" and not solo:
             tier = TIERS[-1]
         else:
             tier = next((t for t in TIERS if tier_cost(t, fp, cp, provider) <= per_q[k]), TIERS[-1])
         kinds[k] = KindPace(tier, per_q[k], tier_cost(tier, fp, cp, provider), n[k])
-    daily = sum(kinds[k].est_cost * questions_per_day(env, k) for k in KINDS)
+    daily = sum(kinds[k].est_cost * questions_per_day(env, k) for k in sel)
     left = max(0.0, remaining - stop_below)
     run_out = today + timedelta(days=int(left / daily)) if daily > 0 else None
     return Pacing(kinds, after_split, run_out)
@@ -319,11 +324,25 @@ def utc_today() -> date:
 PROVIDERS = ("anthropic", "openai", "openrouter")
 
 
+PROVIDER_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "openrouter": "OPENROUTER_API_KEY"}
+KIND_PREFIX = {"main": "MAIN", "minibench": "MINIBENCH"}  # v0.4.0: <PREFIX>_LLM_PROVIDER / <PREFIX>_LLM_PROVIDER_FROM
+PACE_KINDS_VAR = "_PACE_KINDS"  # internal: set only in a per-tournament sub-env, never a repo variable
+
+
 def provider_error(env: dict[str, str]) -> str:
-    raw = (env.get("LLM_PROVIDER") or "").strip().lower()
-    if raw and raw not in PROVIDERS:
-        return f'LLM_PROVIDER="{env.get("LLM_PROVIDER")}" is not allowed: use openrouter, anthropic or openai, or delete it'
-    return ""
+    errors = []
+    for name in ("LLM_PROVIDER", *(f"{p}_LLM_PROVIDER" for p in KIND_PREFIX.values())):
+        raw = (env.get(name) or "").strip().lower()
+        if raw and raw not in PROVIDERS:
+            errors.append(f'{name}="{env.get(name)}" is not allowed: use openrouter, anthropic or openai, or delete it')
+    for p in KIND_PREFIX.values():
+        raw = (env.get(f"{p}_LLM_PROVIDER_FROM") or "").strip()
+        try:
+            if raw:
+                date.fromisoformat(raw)
+        except ValueError:
+            errors.append(f'{p}_LLM_PROVIDER_FROM="{raw}" is not a date: use YYYY-MM-DD (UTC), or delete it')
+    return "; ".join(errors)
 
 
 def select_provider(env: dict[str, str] | None = None) -> str:
@@ -335,7 +354,7 @@ def select_provider(env: dict[str, str] | None = None) -> str:
     if raw in PROVIDERS:
         return raw
     if raw:
-        raise ValueError(provider_error(env))
+        raise ValueError(f'LLM_PROVIDER="{env.get("LLM_PROVIDER")}" is not allowed: use openrouter, anthropic or openai, or delete it')
     if env.get("OPENROUTER_API_KEY"):
         return "openrouter"
     if env.get("ANTHROPIC_API_KEY"):
@@ -343,6 +362,60 @@ def select_provider(env: dict[str, str] | None = None) -> str:
     if env.get("OPENAI_API_KEY"):
         return "openai"
     return "openrouter"
+
+
+def tournament_provider(env: dict[str, str], kind: str, today: date | None = None) -> tuple[str, str]:
+    """v0.4.0 -> (provider for this tournament kind, yellow note). <PREFIX>_LLM_PROVIDER unset, or before
+    <PREFIX>_LLM_PROVIDER_FROM (UTC date): the global choice (select_provider). Set but its key missing:
+    the global choice plus a note."""
+    base = select_provider(env)
+    prefix = KIND_PREFIX.get(kind, "MAIN")
+    raw = (env.get(f"{prefix}_LLM_PROVIDER") or "").strip().lower()
+    if not raw or raw == base:
+        return base, ""
+    if raw not in PROVIDERS:
+        raise ValueError(provider_error(env))
+    start = (env.get(f"{prefix}_LLM_PROVIDER_FROM") or "").strip()
+    if start and (today or utc_today()) < date.fromisoformat(start):
+        return base, ""
+    key = PROVIDER_KEYS[raw]
+    if not env.get(key):
+        return base, f"{prefix}_LLM_PROVIDER={raw}，但 {key} 沒設：{kind} 這輪維持用 {base}"
+    return raw, ""
+
+
+def tournament_providers(env: dict[str, str], today: date | None = None,
+                         kinds: tuple[str, ...] | list[str] = KINDS) -> dict[str, tuple[str, str]]:
+    return {k: tournament_provider(env, k, today) for k in kinds}
+
+
+def provider_schedule_notes(env: dict[str, str], today: date | None = None) -> list[str]:
+    """Info lines for a per-tournament switch that has not started yet."""
+    out = []
+    day = today or utc_today()
+    for kind, prefix in KIND_PREFIX.items():
+        raw = (env.get(f"{prefix}_LLM_PROVIDER") or "").strip().lower()
+        start = (env.get(f"{prefix}_LLM_PROVIDER_FROM") or "").strip()
+        if raw in PROVIDERS and start and day < date.fromisoformat(start):
+            out.append(f"- {kind} 預定 {start}（UTC）起改用 {raw}（{prefix}_LLM_PROVIDER），之前照全域設定")
+    return out
+
+
+def provider_env(env: dict[str, str], provider: str, kinds: list[str] | None = None) -> dict[str, str]:
+    """Copy of env in which every provider-dependent function follows `provider`; with `kinds`, pacing
+    counts only those tournaments (their provider's money serves nothing else)."""
+    sub = dict(env)
+    if provider != select_provider(env):
+        sub["LLM_PROVIDER"] = provider
+    if kinds is not None:
+        sub[PACE_KINDS_VAR] = ",".join(kinds)
+    return sub
+
+
+def pace_kinds(env: dict[str, str]) -> tuple[str, ...]:
+    raw = [k.strip() for k in (env.get(PACE_KINDS_VAR) or "").split(",")]
+    picked = tuple(k for k in KINDS if k in raw)
+    return picked or KINDS
 
 
 def provider_label(provider: str) -> str:
@@ -679,15 +752,19 @@ def openai_plan(questions: list[tuple[str, datetime | None]], free: dict[str, tu
     the rest that close within DEFER_IF_CLOSES_AFTER_H hours are paid, the others wait for another run."""
     left = openai_free_left(free, env)
     hours_left = 24 - (now.hour + now.minute / 60)
-    later = int(round(sum(questions_per_day(env, k) for k in KINDS) * hours_left / 24))
+    sel = pace_kinds(env)  # v0.4.0: only the tournaments on this provider count
+    solo = len(sel) < len(KINDS)
+    later = int(round(sum(questions_per_day(env, k) for k in sel) * hours_left / 24))
     after_split = now.date() >= _date(env, "BUDGET_SPLIT_DATE", "2026-11-01")
 
     def tiers_for(t: Tier) -> dict[str, Tier]:
+        if solo:
+            return {k: t for k in sel}
         return {"main": t, "minibench": TIERS[-1] if after_split else t}
 
     def need(tiers: dict[str, Tier], extra: int) -> int:
         per = [big_tokens_per_question(tiers[k]) for k, _ in questions]
-        return sum(per) + extra * big_tokens_per_question(tiers["main"])
+        return sum(per) + extra * big_tokens_per_question(tiers[sel[0]])
 
     for t in TIERS:
         if need(tiers_for(t), later) <= left:
@@ -714,12 +791,13 @@ def openai_pacing(plan: OpenAIPlan, remaining_usd: float, today: date, env: dict
     """Pacing record for the Summary: tier from the token plan; USD per question = month budget left
     spread over the questions expected until the month ends; est_cost = expected paid USD per question."""
     days_left = max(1, (month_end(today) - today).days)
-    n = {k: max(1, open_unforecasted.get(k, 0), round(days_left * questions_per_day(env, k))) for k in KINDS}
+    sel = pace_kinds(env)
+    n = {k: max(1, open_unforecasted.get(k, 0), round(days_left * questions_per_day(env, k))) for k in sel}
     spendable = max(0.0, remaining_usd - openai_stop_below(env))
-    per_q = spendable / (n["main"] + n["minibench"])
+    per_q = spendable / sum(n.values())
     est = openai_question_cost(env)
-    kinds = {k: KindPace(plan.tiers[k], per_q, est, n[k]) for k in KINDS}
-    daily = est * sum(questions_per_day(env, k) for k in KINDS)
+    kinds = {k: KindPace(plan.tiers[k], per_q, est, n[k]) for k in sel}
+    daily = est * sum(questions_per_day(env, k) for k in sel)
     run_out = today + timedelta(days=int(spendable / daily)) if daily > 0 else None
     return Pacing(kinds, today >= _date(env, "BUDGET_SPLIT_DATE", "2026-11-01"), run_out)
 

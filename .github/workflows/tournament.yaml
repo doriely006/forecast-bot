@@ -53,6 +53,11 @@ jobs:
       MIN_MINUTES_BEFORE_CLOSE: ${{ vars.MIN_MINUTES_BEFORE_CLOSE }}
       # v0.2.0: Anthropic API path (used when there is no OpenRouter key, or LLM_PROVIDER=anthropic)
       LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
+      # v0.4.0: per-tournament provider (unset = LLM_PROVIDER / key order); _FROM = UTC date it starts
+      MAIN_LLM_PROVIDER: ${{ vars.MAIN_LLM_PROVIDER }}
+      MAIN_LLM_PROVIDER_FROM: ${{ vars.MAIN_LLM_PROVIDER_FROM }}
+      MINIBENCH_LLM_PROVIDER: ${{ vars.MINIBENCH_LLM_PROVIDER }}
+      MINIBENCH_LLM_PROVIDER_FROM: ${{ vars.MINIBENCH_LLM_PROVIDER_FROM }}
       ANTHROPIC_FORECAST_MODEL: ${{ vars.ANTHROPIC_FORECAST_MODEL }}
       ANTHROPIC_RESEARCH_MODEL: ${{ vars.ANTHROPIC_RESEARCH_MODEL }}
       ANTHROPIC_FORECAST_PRICE: ${{ vars.ANTHROPIC_FORECAST_PRICE }}

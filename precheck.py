@@ -29,7 +29,7 @@ from typing import Any, Callable
 import budget
 import state as state_mod
 
-VERSION = "0.3.3"
+VERSION = "0.4.0"
 SWITCHES = ("BOT_ENABLED", "PUBLISH", "DRY_RUN_LLM")
 # Must equal forecasting_tools.MetaculusClient.CURRENT_AI_COMPETITION_ID /
 # CURRENT_MINIBENCH_ID (asserted in tests).
@@ -252,6 +252,8 @@ def pacing_lines(decision: budget.BudgetDecision, items: list[QItem], env: dict[
         for k, v in p.kinds.items()
     ]
     split = "已過分配日，正賽優先" if p.after_split else "分配日前，兩邊同配置"
+    if len(budget.pace_kinds(env)) < len(budget.KINDS):  # v0.4.0: this provider pays for one tournament only
+        split = "這個 provider 只配這個賽事"
     return [
         f"- 配速（{split}）：" + "；".join(parts),
         f"- 預估額度見底日：{p.run_out.isoformat() if p.run_out else 'n/a'}",
@@ -355,6 +357,43 @@ class Deps:
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
 
+@dataclass
+class ProviderPart:
+    provider: str
+    warn: list[str]
+    info: list[str]
+    new: list[QItem]
+    needs_llm: bool
+    problem: str
+
+
+def _provider_part(env: dict[str, str], provider: str, store: state_mod.PendingComments, deps: "Deps",
+                   items: list[QItem], new: list[QItem], publish: bool, dry_llm: bool) -> ProviderPart:
+    """Budget lines, work and red reason for one provider over `items` (`env` = budget.provider_env)."""
+    label = budget.provider_label(provider)
+    lookup = budget.lookup_for(env, store, deps.get_json, deps.now().date())
+    decision = budget.decide(lookup, env)
+    needs_llm = (publish and bool(new)) or (not publish and dry_llm)
+    problem = ""
+    if publish and decision.systemic:
+        problem = f"{label}：{decision.reason}"
+    elif needs_llm and not decision.may_call_llm:
+        problem = f"{label}：{decision.reason}"
+    warn = _block("WARNING", decision.warning) if decision.warning else []
+    info = [f"- Provider：{provider}", f"- {label} 額度：{decision.state}（{decision.reason}）"]
+    if provider == "anthropic" and decision.remaining is not None:
+        start, nxt = budget.credit_period(deps.now().date(), budget.credit_reset_day(env))
+        info.append(f"- Anthropic 本期（{start} 起，{nxt} 重置，本機記帳）：已花 "
+                    f"{_money(budget.anthropic_budget(env) - decision.remaining)}／預算 "
+                    f"{_money(budget.anthropic_budget(env))}")
+    info += pacing_lines(decision, items, env)
+    if provider == "openai" and decision.remaining is not None:
+        new, plan_lines = openai_precheck(lookup, new, env, deps.now())
+        info += plan_lines
+        needs_llm = (publish and bool(new)) or (not publish and dry_llm)
+    return ProviderPart(provider, warn, info, new, needs_llm, problem)
+
+
 def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
     """-> (exit code, work for main.py, summary markdown)."""
     deps = deps or Deps()
@@ -402,10 +441,7 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
         for d in dropped:
             lines += _block("CAUTION", f"**放棄補送說明**（試了 {state_mod.MAX_RESEND_ATTEMPTS} 次）：{d.get('url', d['post_id'])}")
 
-    provider = budget.select_provider(env)
-    label = budget.provider_label(provider)
-    lookup = budget.lookup_for(env, store, deps.get_json, deps.now().date())
-    decision = budget.decide(lookup, env)
+    plan = budget.tournament_providers(env, deps.now().date())  # v0.4.0
     fail_limit = state_mod.max_failed_runs(env)
     cooldown = state_mod.skip_cooldown_hours(env)
     # v0.1.2/3: questions that failed MAX_QUESTION_FAILED_RUNS runs in a row are not "work"
@@ -421,31 +457,40 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
     ]
     unsupported = [it for it in items if not it.supported]
     dry_llm = env.get("DRY_RUN_LLM", "") == "1" and event == "workflow_dispatch"
-    needs_llm = (publish and bool(new)) or (not publish and dry_llm)
-    if publish and decision.systemic:
-        systemic.append(f"{label}：{decision.reason}")
-    elif needs_llm and not decision.may_call_llm:
-        systemic.append(f"{label}：{decision.reason}")
-    if decision.warning:
-        lines += _block("WARNING", decision.warning)
-
     per = "、".join(f"{k} {v}" for k, v in counts.items()) or "無"
-    lines += [
-        f"- 開放題：{len(items)}（{per}）；已預測 {sum(it.forecasted for it in items)}；"
-        f"還沒預測 {len(new)}；不支援的題型跳過 {len(unsupported)}",
-        f"- Provider：{provider}",
-        f"- {label} 額度：{decision.state}（{decision.reason}）",
-    ]
-    if provider == "anthropic" and decision.remaining is not None:
-        start, nxt = budget.credit_period(deps.now().date(), budget.credit_reset_day(env))
-        lines.append(f"- Anthropic 本期（{start} 起，{nxt} 重置，本機記帳）：已花 "
-                     f"{_money(budget.anthropic_budget(env) - decision.remaining)}／預算 "
-                     f"{_money(budget.anthropic_budget(env))}")
-    lines += pacing_lines(decision, items, env)
-    if provider == "openai" and decision.remaining is not None:
-        new, plan_lines = openai_precheck(lookup, new, env, deps.now())
-        lines += plan_lines
-        needs_llm = (publish and bool(new)) or (not publish and dry_llm)
+    open_line = (f"- 開放題：{len(items)}（{per}）；已預測 {sum(it.forecasted for it in items)}；"
+                 f"還沒預測 {len(new)}；不支援的題型跳過 {len(unsupported)}")
+    for note in [n for _, n in plan.values() if n]:
+        lines += _block("WARNING", note)
+    if len({p for p, _ in plan.values()}) == 1:  # one provider for both (unset vars: as before)
+        provider = plan["main"][0]
+        part = _provider_part(budget.provider_env(env, provider), provider, store, deps, items, new, publish, dry_llm)
+        lines += part.warn
+        lines.append(open_line)
+        lines += part.info + budget.provider_schedule_notes(env, deps.now().date())
+        systemic += [part.problem] if part.problem else []
+        needs_llm = part.needs_llm
+    else:  # v0.4.0: each tournament on its own provider; one provider's trouble only stops its tournament
+        parts = {}
+        for kind in budget.KINDS:
+            provider = plan[kind][0]
+            mine = [it for it in items if budget.kind_of(it.tournament) == kind]
+            parts[kind] = _provider_part(budget.provider_env(env, provider, [kind]), provider, store, deps, mine,
+                                         [it for it in new if budget.kind_of(it.tournament) == kind], publish, dry_llm)
+        healthy = any(not pt.problem for pt in parts.values())
+        for pt in parts.values():
+            lines += pt.warn
+        lines.append(open_line)
+        for kind, pt in parts.items():
+            lines.append(f"- {kind}（{pt.provider}）：")
+            lines += ["  " + x for x in pt.info]
+        lines += budget.provider_schedule_notes(env, deps.now().date())
+        for kind, pt in parts.items():
+            if pt.problem and healthy:
+                lines += _block("WARNING", f"**{kind}（{budget.provider_label(pt.provider)}）這輪不跑，另一個賽事照跑**：{pt.problem}")
+            elif pt.problem:
+                systemic.append(pt.problem)
+        needs_llm = any(pt.needs_llm and not pt.problem for pt in parts.values())
     lines += _skipped_block(stuck, fail_limit, cooldown)
     work = needs_llm and not systemic
     if publish:
