@@ -2,6 +2,13 @@
 
 ## 收工日誌
 
+### 週檢 2026-11-01
+- 「Forecast on tournament questions」10-25 起：success 42／failure 0（含 7 次 10-26 workflow_dispatch）。每天都有成功 run；最後一輪 10-31 23:16Z。
+- 本週新交 22（19 輪有跑 main.py，排除上週已計的 40150278803）；失敗 0；預算不足跳過 0；臨截止跳過 1（40767710556）。
+- 最近有交題 run 41236185862：OpenAI 10 月付費 $1.05／$4.50（本機記帳）、剩餘 $3.45、配速 full（main／minibench 各 $0.40／題）、預估見底 2026-11-08（晚於 10 月底，月換已重置）。
+- 無停損、無 fatal。開放題時都有交。
+- 判斷：沒事。tool token 10-26 已校準，不推播；本機 10 月 $1.05 vs Usage 頁的對帳仍待 user 下次給截圖（見待辦）。MiniBench 11-01 起切 anthropic，這次檢查時還沒有切換後的 run。
+
 ### 2026-10-27 v0.4.1 MiniBench 備援：Anthropic 用不了就改 OpenAI（同一輪）
 - 真跑 run 40355520725（暫把 FROM 設 10-26，跑完改回 11-01）：split 路徑起得來（minibench anthropic／main openai、配速 minimum），但 MiniBench 0 開放題＝備援路徑沒被真打到，仍未驗。
 - user 10-26 裁定：MiniBench 不准停。觸發＝`runner.unusable(r)`：有 `stopped`／`skipped_budget` outcome，或 fatal failed，或 probe fatal（連 non-fatal failed 也搬）。一般單題失敗不觸發（照計數）。
