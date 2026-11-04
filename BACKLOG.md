@@ -2,6 +2,15 @@
 
 ## 收工日誌
 
+### 2026-11-04 standings 診斷：bot 不在榜／MiniBench 0 筆（未改 code、未 bump，v0.4.1）
+- 症狀：run 41766125578（11-04 03:17Z）正賽 412 筆無 midnightsharp-bot、MiniBench 0 筆；user 說網站上 bot 已有數字。
+- 查到：project id 沒錯。正賽 33121、MiniBench slug `minibench` 都＝`precheck.TOURNAMENTS`，且與 forecasting_tools `CURRENT_AI_COMPETITION_ID`／`CURRENT_MINIBENCH_ID`（metaculus_client.py:161）一致＝bot 實際交題的同一組；repo vars 沒有 STANDINGS_*_PROJECT 覆寫。slug 解析沒拋錯。
+- 正賽 412 筆 usernames 解析正常（非 EntryShapeError）-> parse 沒壞；缺的只是 bot 這筆。
+- 沒驗：本機無 .env／token，公開 API 回 "only available to authenticated users"、網站 403 -> 無法實測 boards 內容。故「是否在非 primary board」「bot_exclusion」「MiniBench primary board 是否本來就空」都是推測，未證實。
+- 最可能（[G]）：(a) 榜 entries 要等題目結算＋榜更新才有 bot（10-23 起交題，MiniBench 首輪 11-01 剛結算）；user 在網站看到的多半是單題分數。(b) 次可能：bot 在非 primary board（standings 只讀 primary）。
+- 下一步（要 token）：`GET /leaderboards/project/{33121,minibench 解出的 id}/`，逐 board 印 name／is_primary_leaderboard／bot_exclusion_status／len(entries)／是否含 midnightsharp-bot。若 (b) 成立，再改 parse_entries 掃全部 board。
+- 🟡 standings 診斷行：失敗/未找到時多印「各 board 名稱／primary 旗標／筆數」（只印 key 與數字，不印值），下次手動跑就能一次定案；未做（屬 code 變更，本輪裁定非 code 錯）。
+
 ### 週檢 2026-11-01
 - 「Forecast on tournament questions」10-25 起：success 42／failure 0（含 7 次 10-26 workflow_dispatch）。每天都有成功 run；最後一輪 10-31 23:16Z。
 - 本週新交 22（19 輪有跑 main.py，排除上週已計的 40150278803）；失敗 0；預算不足跳過 0；臨截止跳過 1（40767710556）。
