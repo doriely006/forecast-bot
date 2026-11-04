@@ -112,3 +112,27 @@ def test_empty_board_is_clean_and_unusable_entries_dump_entry_shape():
     lines = "\n".join(standings.standings_lines({"METACULUS_TOKEN": "t"}, get))
     assert "正賽：榜上 0 筆" in lines
     assert "first entry keys=who->{name},pos" in lines and secret not in lines
+
+
+def test_board_overview_finds_bot_in_non_primary_board_without_leaking_others():
+    secret = "OTHER-USER-XYZ"
+
+    def e(n, r):
+        return {"user": {"username": n}, "rank": r, "score": 1.5}
+
+    boards = [
+        {"name": "Main", "is_primary_leaderboard": True, "bot_exclusion_status": "exclude", "entries": [e(secret, 1)]},
+        {"name": "Bots", "is_primary_leaderboard": False, "bot_exclusion_status": "include", "entries": [e(secret, 1), e(ME, 7)]},
+    ]
+
+    def get(url, headers=None, timeout=30):
+        if url.endswith("/users/me"):
+            return {"username": ME}
+        if "/projects/tournaments/" in url:
+            return {"id": 7}
+        return boards
+
+    lines = "\n".join(standings.standings_lines({"METACULUS_TOKEN": "t"}, get))
+    assert "榜上還沒有" in lines and "'Main'（primary，bot_exclusion=exclude，1 筆）" in lines
+    assert "'Bots'（non-primary，bot_exclusion=include，2 筆）" in lines
+    assert f"{ME} 在此 board：rank 7，score 1.5" in lines and secret not in lines

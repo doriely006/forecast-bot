@@ -139,6 +139,23 @@ def shape_of(payload: Any, limit: int = 400) -> str:
     return "; ".join(parts)[:limit]
 
 
+def board_overview(payload: Any, me: str) -> list[str]:
+    """v0.4.2: one line per leaderboard (name/primary/bot_exclusion_status/entry count) plus my own
+    entry wherever it sits, primary or not. Never prints anyone else's data."""
+    if not isinstance(payload, list):
+        return []
+    out = []
+    for i, b in enumerate(x for x in payload if isinstance(x, dict)):
+        raw = b.get("entries") or []
+        name = b.get("name") or b.get("score_type") or b.get("leaderboard_type") or f"#{i}"
+        flag = "primary" if b.get("is_primary_leaderboard") else "non-primary"
+        out.append(f"  - board {str(name)[:40]!r}（{flag}，bot_exclusion={b.get('bot_exclusion_status')}，{len(raw)} 筆）")
+        for e in raw:
+            if isinstance(e, dict) and ((e.get("user") or {}).get("username") or e.get("username")) == me:
+                out.append(f"    - {me} 在此 board：rank {e.get('rank')}，score {e.get('score')}")
+    return out
+
+
 def standings_lines(
     env: dict[str, str], get_json: Callable[..., Any] = budget.http_get_json
 ) -> list[str]:
@@ -166,22 +183,27 @@ def standings_lines(
         seen.clear()
         try:
             pid = resolve_project(project, get, base)
-            entries = parse_entries(get(f"{base}/leaderboards/project/{pid}/"))
+            payload = get(f"{base}/leaderboards/project/{pid}/")
+            entries = parse_entries(payload)
         except Exception as e:
             detail = f"{e.__class__.__name__}: {e}"[:200]
             shape = e.shape if isinstance(e, EntryShapeError) else shape_of(seen[-1]) if seen and seen[-1] is not None else "no response body"
             lines.append(f"- {label}：讀不到排行榜（{detail}）；回應形狀 {shape}"[:400])
             continue
+        overview = board_overview(payload, me)
         if not entries:
             lines.append(f"- {label}：榜上 0 筆")
+            lines.extend(overview)
             continue
         found = non_metac_standing(entries, me)
         if found is None:
             lines.append(f"- {label}：榜上還沒有 {me}（共 {len(entries)} 筆）")
+            lines.extend(overview)
             continue
         rank, total, mine = found
         prize = f"，獎金欄 ${mine.prize:.0f}" if mine.prize else ""
         lines.append(f"- {label}：第 {rank}/{total}（全榜第 {mine.rank}）{prize}")
+        lines.extend(overview)
         if is_main:
             lines.append(f"- 停損：{stop_loss_verdict(rank, total, mine.questions)}")
     return lines
