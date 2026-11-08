@@ -2,6 +2,14 @@
 
 ## 收工日誌
 
+### 週檢 2026-11-08
+- 「Forecast on tournament questions」11-01 起：success 30／failure 0，每天都有成功 run；最後一輪 11-08 01:50Z（42435950328）。
+- 本週新交 28（main 11／MiniBench 17，18 輪有跑 main.py）；失敗 0；預算不足跳過 0；臨截止跳過 1（41395961163 MiniBench）。開放題時都有交，還沒預測的都在同輪交掉。
+- MiniBench 全走 anthropic，沒觸發 openai 備援（log 無「改用 openai」）。
+- 42435950328：OpenAI 11 月付費 $0.28／$4.50（本機記帳）、剩 $4.22、main standard（$0.04／題）、見底 11-29。Anthropic 本期 $1.61／$14、剩 $12.39、minibench standard（$0.59／題）、見底 11-14（本期 11-13 重置，見底在重置之後＝不算早見底）。
+- 無停損（已結算 2 題，未滿 40 不判）、無 fatal／Traceback。
+- 判斷：沒事，不推播。待觀察：Anthropic 本機「11-13 重置」是假設月週期；若 Console credit 是預付不回補，重置後本機會以為又有 $14 —— 屆時看 log 是否出現「改用 openai」。11-08 Haiku 研究品質複查（下一輪開工先做）屬策略檢討，週檢不做。
+
 ### 2026-11-04 v0.4.2 standings：每 board 概況＋全 board 找 bot（結論：不是 code 錯，榜更新晚了）
 - 症狀：run 41766125578（03:17Z）正賽 412 筆無 bot、MiniBench 0 筆；user 說網站已有數字。
 - 實測（手動 run 41861074894，15:45Z，success）：正賽只有一個 board `spot_peer_tournament`（primary、bot_exclusion=0、451 筆），bot 在裡面 rank 210／score 1.63，非 metac bot 第 228/359；已結算 2 題（停損未判）。榜 412 -> 451 筆＝榜是批次更新，03:17Z 時 bot 還沒進榜。
