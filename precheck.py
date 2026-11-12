@@ -29,7 +29,7 @@ from typing import Any, Callable
 import budget
 import state as state_mod
 
-VERSION = "0.4.6"
+VERSION = "0.4.7"
 SWITCHES = ("BOT_ENABLED", "PUBLISH", "DRY_RUN_LLM")
 # Must equal forecasting_tools.MetaculusClient.CURRENT_AI_COMPETITION_ID /
 # CURRENT_MINIBENCH_ID (asserted in tests).
@@ -76,6 +76,7 @@ class QItem:
     close_time: str | None
     forecasted: bool  # same rule as the SDK: my_forecasts.history non-empty
     last_forecast: datetime | None = None  # v0.4.6: my latest forecast (re-forecast window check)
+    fc_shape: str = ""  # v0.4.7: key names / types of my_forecasts (never values), diagnostics
 
     @property
     def url(self) -> str:
@@ -152,6 +153,32 @@ def last_forecast_time(q: dict[str, Any] | None) -> datetime | None:
     return max(times) if times else None
 
 
+def _type_name(v: Any) -> str:
+    if isinstance(v, list):
+        return f"list[{len(v)}]"
+    return type(v).__name__
+
+
+def forecast_shape(q: dict[str, Any] | None, limit: int = 300) -> str:
+    """v0.4.7: my_forecasts key names and types, one level into `latest` and the first history entry; never values
+    (public repo logs; same idea as standings.shape_of)."""
+    if not isinstance(q, dict):
+        return f"question={_type_name(q)}"
+    if "my_forecasts" not in q:
+        return "my_forecasts=missing; question keys=" + ",".join(str(k) for k in q)[:200]
+    mine = q["my_forecasts"]
+    if not isinstance(mine, dict):
+        return f"my_forecasts={_type_name(mine)}"
+    parts = ["my_forecasts{" + ",".join(f"{k}:{_type_name(v)}" for k, v in mine.items()) + "}"]
+    latest = mine.get("latest")
+    if isinstance(latest, dict):
+        parts.append("latest{" + ",".join(f"{k}:{_type_name(v)}" for k, v in latest.items()) + "}")
+    hist = mine.get("history")
+    if isinstance(hist, list) and hist and isinstance(hist[0], dict):
+        parts.append("history[0]{" + ",".join(f"{k}:{_type_name(v)}" for k, v in hist[0].items()) + "}")
+    return "; ".join(parts)[:limit]
+
+
 def reforecast_due(forecasted: bool, close: datetime | None, last: datetime | None, now: datetime,
                    hours: float) -> bool:
     """v0.4.6 (every tournament alike): answered before, now inside the last `hours` before close, and the latest
@@ -184,16 +211,19 @@ def flatten_post(post: dict[str, Any], tournament: str, now: datetime | None = N
     if group:
         return [
             QItem(tournament, pid, q.get("id"), q.get("type", "?"), f"{title} / {q.get('label', '')}",
-                  q.get("open_time"), q.get("scheduled_close_time"), _forecasted(q), last_forecast_time(q))
+                  q.get("open_time"), q.get("scheduled_close_time"), _forecasted(q), last_forecast_time(q),
+                  forecast_shape(q))
             for q in group.get("questions", []) if _sub_open(q, now)
         ]
     if post.get("conditional"):
         yes = post["conditional"].get("question_yes", {})
         return [QItem(tournament, pid, None, "conditional", title, yes.get("open_time"),
-                      yes.get("scheduled_close_time"), _forecasted(yes), last_forecast_time(yes))]
+                      yes.get("scheduled_close_time"), _forecasted(yes), last_forecast_time(yes),
+                      forecast_shape(yes))]
     q = post.get("question") or {}
     return [QItem(tournament, pid, q.get("id"), q.get("type", "?"), title,
-                  q.get("open_time"), q.get("scheduled_close_time"), _forecasted(q), last_forecast_time(q))]
+                  q.get("open_time"), q.get("scheduled_close_time"), _forecasted(q), last_forecast_time(q),
+                  forecast_shape(q))]
 
 
 REFORECAST_KEY_PREFIX = "re:"
@@ -228,6 +258,18 @@ def due_reforecasts(items: list[QItem], env: dict[str, str], now: datetime) -> l
     return out
 
 
+def last_forecast_lines(items: list[QItem], show: int = 5) -> list[str]:
+    """v0.4.7 diagnostics: answered questions whose last-forecast time could / could not be read, plus the
+    my_forecasts shape of unreadable ones and of the first open question (key names / types only)."""
+    done = [it for it in items if it.forecasted]
+    bad = [it for it in done if it.last_forecast is None]
+    out = [f"- 已預測題的最後預測時間：讀到 {len(done) - len(bad)}／讀不到 {len(bad)}"]
+    out += [f"  - 讀不到 {it.post_id}/{it.question_id} shape: {it.fc_shape}" for it in bad[:show]]
+    if items:
+        out.append(f"  - 第一題 my_forecasts shape（{items[0].post_id}/{items[0].question_id}）：{items[0].fc_shape}")
+    return out
+
+
 class FetchError(Exception):
     def __init__(self, message: str, status: int | None = None):
         super().__init__(message)
@@ -249,7 +291,10 @@ def fetch_open_items(
     while True:
         params = urllib.parse.urlencode(
             {"tournaments": tid, "statuses": "open", "limit": 100, "offset": offset,
-             "order_by": "-published_time"}
+             "order_by": "-published_time",
+             # v0.4.7: same as forecasting_tools MetaculusClient._create_url_params_for_search; without with_cp the
+             # list endpoint left my_forecasts out (precheck saw 0 answered while the SDK saw them)
+             "with_cp": "true", "include_conditional_cps": "true"}
         )
         try:
             data = get_json(f"{base}/posts/?{params}",
@@ -578,6 +623,9 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
     open_line = (f"- 開放題：{len(items)}（{per}）；已預測 {sum(it.forecasted for it in items)}；"
                  f"還沒預測 {len(new) - re_count}；不支援的題型跳過 {len(unsupported)}\n"
                  f"- 截止前重答：{re_count}")
+    diag = last_forecast_lines(items)
+    for d in diag:
+        print(d)
     for note in [n for _, n in plan.values() if n]:
         lines += _block("WARNING", note)
     if len({p for p, _ in plan.values()}) == 1:  # one provider for both (unset vars: as before)
@@ -591,6 +639,7 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
             lines += old.warn
         lines += part.warn
         lines.append(open_line)
+        lines += diag
         if old is not None:
             lines.append(f"- 全部賽事（{old.provider}，用不了）：")
             lines += ["  " + x for x in old.info]
@@ -618,6 +667,7 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
         for pt in [*fell.values(), *parts.values()]:
             lines += pt.warn
         lines.append(open_line)
+        lines += diag
         for kind, pt in parts.items():
             if kind in fell:
                 lines.append(f"- {kind}（{fell[kind].provider}，用不了）：")

@@ -162,6 +162,8 @@ class RunResult:
     open_counts: dict[str, int] = field(default_factory=dict)
     already_forecasted: int = 0
     reforecast_due: int = 0  # v0.4.6: answered before and due for the one re-forecast before close
+    last_read: int = 0  # v0.4.7: answered open questions whose last-forecast time was read
+    last_unknown: list[str] = field(default_factory=list)  # v0.4.7: "<id> shape: <my_forecasts shape>"
     unsupported: int = 0
     not_attempted_cap: int = 0
     fetch_errors: list[str] = field(default_factory=list)
@@ -341,8 +343,18 @@ async def run(
             if key in seen:
                 continue
             seen.add(key)
+            last = last_forecast(q) if q.already_forecasted else None
+            if q.already_forecasted:  # v0.4.7 diagnostics (ids and times only)
+                print(f"LASTFORECAST {q.id_of_question} {last.isoformat() if last else 'unknown'} "
+                      f"close={q.close_time.isoformat() if q.close_time else 'unknown'}", flush=True)
+                if last is not None:
+                    result.last_read += 1
+                else:
+                    api = getattr(q, "api_json", None)
+                    result.last_unknown.append(f"{q.id_of_question} shape: " + precheck.forecast_shape(
+                        api.get("question") if isinstance(api, dict) else None))
             redo = skip_forecasted and q.already_forecasted and is_supported(q) and precheck.reforecast_due(
-                True, q.close_time, last_forecast(q), clock, re_hours)
+                True, q.close_time, last, clock, re_hours)
             if skip_forecasted and q.already_forecasted and not redo:
                 result.already_forecasted += 1
             elif not is_supported(q):
@@ -718,6 +730,8 @@ def render_summary(r: RunResult, with_header: bool = True, section: str | None =
         f"- 已預測跳過：{r.already_forecasted}；不支援題型跳過：{r.unsupported}",
         f"- 這輪新交：{r.new_ok - r.reforecast_ok}" + ("" if r.publish else "（dry run，沒送）"),
         f"- 截止前重答：{r.reforecast_ok}",
+        f"- 已預測題的最後預測時間：讀到 {r.last_read}／讀不到 {len(r.last_unknown)}",
+        *[f"  - 讀不到 {x}" for x in r.last_unknown[:5]],
         f"- 失敗：{r.failed}",
         f"- 說明沒送出：{comment_failed}",
         f"- 臨截止跳過（不花 LLM）：{r.count('skipped_closing')}；作答期間已截止（沒送出）：{r.count('closed')}",

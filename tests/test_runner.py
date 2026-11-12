@@ -795,3 +795,15 @@ def test_failing_reforecast_counts_on_its_own_key(fake_llm, tmp_path):
     assert o.status == "failed" and o.reforecast
     again = state.PendingComments.load(tmp_path)
     assert again.failed_runs("2203") == 0 and again.failed_runs("re:2203") == 1
+
+
+def test_lastforecast_diagnostics_printed_and_in_summary(fake_llm, capsys):  # v0.4.7
+    known = _answered(_CLOCK + _td(hours=30), _CLOCK - _td(days=1), qid=2281)
+    blind = _answered(_CLOCK + _td(hours=30), _CLOCK - _td(days=1), qid=2282)
+    blind.api_json = {"question": {"my_forecasts": {"history": [], "latest": None}}}
+    r = do_run(_mini(known, blind), publish=True)
+    out = capsys.readouterr().out
+    assert f"LASTFORECAST 2281 {(_CLOCK - _td(days=1)).isoformat()} close=" in out
+    assert "LASTFORECAST 2282 unknown close=" in out
+    text = runner.render_summary(r)
+    assert "已預測題的最後預測時間：讀到 1／讀不到 1" in text and "2282 shape: my_forecasts{history:list[0],latest:NoneType}" in text

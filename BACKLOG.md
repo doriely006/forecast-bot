@@ -2,6 +2,13 @@
 
 ## 收工日誌
 
+### 2026-11-12 v0.4.7 precheck 認得 group subquestion 的已預測＋最後預測時間診斷
+- 症狀：run 43245626904 precheck「已預測 0；還沒預測 5」，runner 同輪「這輪新交：0」（SDK 認得 13:57Z 已送的 46249/46248/46250/46279/46199）。
+- 根因：precheck `fetch_open_items` 打 `/posts/` 沒帶 `with_cp=true`／`include_conditional_cps=true`；SDK `metaculus_client.py:_create_url_params_for_search`（849-850）有帶。判法本身兩邊同為 `my_forecasts.history` 非空。修：precheck 參數補成跟 SDK 一樣。
+- 診斷：precheck 與 runner Summary 各一行「已預測題的最後預測時間：讀到 N／讀不到 M」＋讀不到者 `forecast_shape`（my_forecasts 的 key:型別，不印值）；precheck 另印第一題 shape；runner 每個已預測開放題 stdout 印 `LASTFORECAST <qid> <ISO|unknown> close=<ISO>`。
+- 測試 243 passed（新 3：仿真 group post＋只有 with_cp 才回 my_forecasts 的假 API、shape 不洩值、runner 診斷行）。版號 0.4.7。
+- 真跑驗證：見下一行。
+
 ### 2026-11-12 v0.4.6 截止前重答一次
 - 條件（全賽事同規則）：已預測＋`close-H <= now < close`＋最後一筆預測早於 `close-H`；H＝env `REFORECAST_HOURS_BEFORE_CLOSE`（預設 12，壞值／<0 回 12，"0"＝關）。`precheck.reforecast_due`，runner 共用。MIN_MINUTES_BEFORE_CLOSE 臨截止跳過照舊在前。
 - 最後預測時間：`api_json["question"]["my_forecasts"]["latest"]["start_time"]`（SDK `data_models/questions.py:293-299` `timestamp_of_my_last_forecast` 讀的欄位），沒有再退 history 最大 start_time；數字＝unix 秒、字串＝ISO 都吃。group 展開後 SDK 把 subquestion json 放進 `question`，同欄位可用。無狀態，`.state` 不記；讀不到＝不重答。

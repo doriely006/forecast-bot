@@ -293,3 +293,58 @@ def test_group_subquestions_closed_or_upcoming_are_not_open(tmp_path):
     assert [it.question_id for it in items] == [71]
     code, work, text = run(env(PUBLISH="1"), api=Api(main=[group], mini1=[], mini2=[]), tmp=tmp_path, now=T_NOW)
     assert work is True and "開放題：1" in text and "還沒預測 1" in text
+
+
+# ---- v0.4.7: group subquestions answered by the bot (real-API-like shape); precheck == SDK/runner
+_T_POSTED = datetime(2026, 11, 12, 13, 57, 10, tzinfo=timezone.utc)
+
+
+def _sub(qid, label):
+    entry = {"question_id": qid, "author_id": 1, "start_time": _T_POSTED.timestamp(), "end_time": None,
+             "forecast_values": [0.6, 0.4], "interval_lower_bounds": None, "centers": None,
+             "interval_upper_bounds": None}
+    return {"id": qid, "title": f"Market Pulse sub {label}", "label": label, "type": "binary", "status": "open",
+            "open_time": "2026-11-10T00:00:00Z", "scheduled_close_time": "2026-11-21T20:00:00Z",
+            "scheduled_resolve_time": "2026-11-22T00:00:00Z", "description": "", "fine_print": "",
+            "resolution_criteria": "", "aggregations": {}, "my_forecasts": {"history": [entry], "latest": entry,
+                                                                              "score_data": {}}}
+
+
+GROUP_POST = {"id": 46000, "title": "Market Pulse group", "projects": {
+    "tournament": [{"slug": "market-pulse-26q4", "id": 1}], "default_project": {"id": 1, "visibility": "normal"}},
+    "group_of_questions": {"description": "d", "fine_print": "f", "resolution_criteria": "r",
+                           "questions": [_sub(46249, "A"), _sub(46248, "B")]}}
+
+
+class WithCpApi(Api):
+    """The list endpoint only carries my_forecasts when with_cp=true (what the SDK sends)."""
+
+    def __call__(self, url, headers=None, timeout=20):
+        if "market-pulse-26q4" in url:
+            import copy
+            post = copy.deepcopy(GROUP_POST)
+            if "with_cp=true" not in url:
+                for x in post["group_of_questions"]["questions"]:
+                    x.pop("my_forecasts")
+            return {"results": [post], "next": None}
+        return super().__call__(url, headers, timeout)
+
+
+def test_precheck_sees_answered_group_subquestions_like_the_sdk(tmp_path):
+    from forecasting_tools import MetaculusClient
+
+    now = datetime(2026, 11, 12, 15, 14, tzinfo=timezone.utc)
+    code, work, text = run(env(PUBLISH="1"), api=WithCpApi(main=[], mini1=[], mini2=[]), tmp=tmp_path, now=now)
+    assert "已預測 2；還沒預測 0" in text and "截止前重答：0" in text and work is False
+    assert "最後預測時間：讀到 2／讀不到 0" in text
+    sdk = MetaculusClient._unpack_group_question(GROUP_POST)  # what the runner gets for the same post
+    assert all(x.already_forecasted for x in sdk)
+    items = precheck.flatten_post(GROUP_POST, "Market Pulse 26Q4", now)
+    import runner
+    assert [runner.last_forecast(x) for x in sdk] == [it.last_forecast for it in items] == [_T_POSTED] * 2
+
+
+def test_forecast_shape_has_keys_and_types_never_values():
+    shape = precheck.forecast_shape(_sub(1, "A"))
+    assert "latest{" in shape and "start_time:float" in shape and "0.6" not in shape
+    assert precheck.forecast_shape({"id": 1}).startswith("my_forecasts=missing")
