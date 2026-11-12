@@ -7,7 +7,7 @@
 - 根因：precheck `fetch_open_items` 打 `/posts/` 沒帶 `with_cp=true`／`include_conditional_cps=true`；SDK `metaculus_client.py:_create_url_params_for_search`（849-850）有帶。判法本身兩邊同為 `my_forecasts.history` 非空。修：precheck 參數補成跟 SDK 一樣。
 - 診斷：precheck 與 runner Summary 各一行「已預測題的最後預測時間：讀到 N／讀不到 M」＋讀不到者 `forecast_shape`（my_forecasts 的 key:型別，不印值）；precheck 另印第一題 shape；runner 每個已預測開放題 stdout 印 `LASTFORECAST <qid> <ISO|unknown> close=<ISO>`。
 - 測試 243 passed（新 3：仿真 group post＋只有 with_cp 才回 my_forecasts 的假 API、shape 不洩值、runner 診斷行）。版號 0.4.7。
-- 真跑驗證：見下一行。
+- 真跑 run 43246206848（670433c）：precheck「已預測 5；還沒預測 0」「最後預測時間：讀到 5／讀不到 0」、shape latest.start_time:float、job 沒進 main.py（無工作＝正確）-> runner 的 LASTFORECAST 沒機會印；precheck 補印同格式 LASTFORECAST 行，第二次真跑對時間（見下一行）。
 
 ### 2026-11-12 v0.4.6 截止前重答一次
 - 條件（全賽事同規則）：已預測＋`close-H <= now < close`＋最後一筆預測早於 `close-H`；H＝env `REFORECAST_HOURS_BEFORE_CLOSE`（預設 12，壞值／<0 回 12，"0"＝關）。`precheck.reforecast_due`，runner 共用。MIN_MINUTES_BEFORE_CLOSE 臨截止跳過照舊在前。

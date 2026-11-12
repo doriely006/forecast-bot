@@ -626,6 +626,10 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
     diag = last_forecast_lines(items)
     for d in diag:
         print(d)
+    for it in items:  # v0.4.7: same line as runner's, so the read times are checkable even when main.py is skipped
+        if it.forecasted:
+            print(f"LASTFORECAST {it.question_id} {it.last_forecast.isoformat() if it.last_forecast else 'unknown'} "
+                  f"close={it.close_time or 'unknown'}", flush=True)
     for note in [n for _, n in plan.values() if n]:
         lines += _block("WARNING", note)
     if len({p for p, _ in plan.values()}) == 1:  # one provider for both (unset vars: as before)

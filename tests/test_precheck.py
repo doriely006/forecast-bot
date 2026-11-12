@@ -330,13 +330,14 @@ class WithCpApi(Api):
         return super().__call__(url, headers, timeout)
 
 
-def test_precheck_sees_answered_group_subquestions_like_the_sdk(tmp_path):
+def test_precheck_sees_answered_group_subquestions_like_the_sdk(tmp_path, capsys):
     from forecasting_tools import MetaculusClient
 
     now = datetime(2026, 11, 12, 15, 14, tzinfo=timezone.utc)
     code, work, text = run(env(PUBLISH="1"), api=WithCpApi(main=[], mini1=[], mini2=[]), tmp=tmp_path, now=now)
     assert "已預測 2；還沒預測 0" in text and "截止前重答：0" in text and work is False
     assert "最後預測時間：讀到 2／讀不到 0" in text
+    assert f"LASTFORECAST 46249 {_T_POSTED.isoformat()} close=2026-11-21T20:00:00Z" in capsys.readouterr().out
     sdk = MetaculusClient._unpack_group_question(GROUP_POST)  # what the runner gets for the same post
     assert all(x.already_forecasted for x in sdk)
     items = precheck.flatten_post(GROUP_POST, "Market Pulse 26Q4", now)
