@@ -2,6 +2,15 @@
 
 ## 收工日誌
 
+### 2026-11-12 收尾：變數現值＋真跑驗證（run 43231898167，v0.4.5，success）
+- repo variable 現值（以 `gh variable list` 為準）：`MAIN_LLM_PROVIDER=anthropic`、`MINIBENCH_LLM_PROVIDER=anthropic`、`LLM_PROVIDER=openai`（備援）、`ANTHROPIC_BUDGET_USD=80`、`ANTHROPIC_CREDIT_RESET_DAY=1`、`MINIBENCH_MINIMUM_AFTER_SPLIT=0`、`MAIN_BUDGET_SHARE=0.5`。
+- 真跑：共用路徑起得來（「全部賽事同一個 provider（共用一份預算）」）；main／minibench 都 Opus x5（$0.52／題 -> full，估 $0.47）；研究 Haiku。Market Pulse 5 題新交、失敗 0、花 $1.09（實測約 $0.22／題 full）。`RESEARCH` 段 5 筆有印出。
+- 中途事故：先設 MAIN_LLM_PROVIDER 時（v0.4.3）單一路徑無備援＋C6 把 MiniBench 壓成 minimum（run 43229870890 precheck，0 開放題、沒交題），當場刪變數止血，v0.4.4 修完才重開。
+- Haiku 研究初看（只讀了 46016 一題）：對題、有日期、引 SEC／NVIDIA 原始稿、有 base rate。正式複查仍待累積 8～10 題。
+- 🟡 precheck 把 Market Pulse 已截止／未開的 subquestion 也算開放（列 69、實際可答 5）-> 每 20 分鐘都判有工作、job 空轉（不花 LLM）。修法：precheck 展開 group 時照 subquestion 自己的 open／close 時間過濾。
+- 🟡 Market Pulse 榜沒接進 standings.py。
+- 沒驗：備援真觸發；Console 與本機帳對帳（本機 11-01 起從 $0 算，Console 11 月另有 $1.56）。
+
 ### 2026-11-12 v0.4.5 加 Market Pulse 26Q4
 - 改動：`precheck.TOURNAMENTS` 加 `("Market Pulse 26Q4", "market-pulse-26q4")`；`budget.kind_of` 名稱不含 minibench＝"main"（跟正賽共用預算與配速；測試鎖住）。`runner.tournaments_for_mode("tournament")` 直接吃 TOURNAMENTS，所以 run／precheck／split 路徑都自動帶上。
 - group question：不用改 code。`runner.fetch_open_questions`（runner.py:74-78）已是 `group_question_mode="unpack_subquestions"`；SDK `metaculus_client.py:_unpack_group_question` 把每個 subquestion 展成一題（沿用 group 的 description／fine_print／resolution_criteria）。precheck 自己抓 API 的路徑（precheck.py:107-108）本來就處理 `group_of_questions`。question key＝`id_of_question`＋`id_of_post`，同一 post 的 subquestion 不撞。
