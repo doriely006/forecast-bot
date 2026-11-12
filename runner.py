@@ -148,6 +148,7 @@ class Outcome:
     cost: float = 0.0
     fatal: bool = False  # run-wide 401/402 (or Anthropic credit exhausted): not this question's fault, never counted
     key: str = ""  # v0.4.1: state question key (provider log)
+    reforecast: bool = False  # v0.4.6: answered before; this is the one re-forecast before close
 
 
 @dataclass
@@ -160,6 +161,7 @@ class RunResult:
     pacing: budget.Pacing | None = None
     open_counts: dict[str, int] = field(default_factory=dict)
     already_forecasted: int = 0
+    reforecast_due: int = 0  # v0.4.6: answered before and due for the one re-forecast before close
     unsupported: int = 0
     not_attempted_cap: int = 0
     fetch_errors: list[str] = field(default_factory=list)
@@ -200,6 +202,10 @@ class RunResult:
     @property
     def new_ok(self) -> int:
         return self.count("submitted", "comment_failed", "dry_run")
+
+    @property
+    def reforecast_ok(self) -> int:
+        return sum(o.reforecast and o.status in ("submitted", "comment_failed", "dry_run") for o in self.outcomes)
 
     @property
     def failed(self) -> int:
@@ -311,6 +317,8 @@ async def run(
         clock = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
     closing_cutoff = clock + timedelta(minutes=min_minutes_before_close(env))
     closing: list[Outcome] = []
+    re_hours = precheck.reforecast_hours(env)
+    refore: set[str] = set()  # v0.4.6: question keys of this run's re-forecasts
 
     to_forecast: list[tuple[str, Any]] = []
     seen: set[Any] = set()
@@ -333,7 +341,9 @@ async def run(
             if key in seen:
                 continue
             seen.add(key)
-            if skip_forecasted and q.already_forecasted:
+            redo = skip_forecasted and q.already_forecasted and is_supported(q) and precheck.reforecast_due(
+                True, q.close_time, last_forecast(q), clock, re_hours)
+            if skip_forecasted and q.already_forecasted and not redo:
                 result.already_forecasted += 1
             elif not is_supported(q):
                 result.unsupported += 1
@@ -341,11 +351,15 @@ async def run(
                 closing.append(Outcome(name, q.question_text[:80], q.page_url, "skipped_closing",
                                        f"close {_iso(q.close_time)}"))
             else:
+                if redo:
+                    refore.add(_qkey(q))
+                    result.reforecast_due += 1
                 to_forecast.append((name, q))
 
-    to_forecast.sort(key=_close_key)  # closing soonest first
+    # new questions first, then re-forecasts (v0.4.6: with too little budget the new ones win); each closing soonest first
+    to_forecast.sort(key=lambda item: (_qkey(item[1]) in refore, _close_key(item)))
     if store is not None and mode == "tournament":
-        to_forecast = _drop_failing(store, to_forecast, env, result, now, prune_failures)
+        to_forecast = _drop_failing(store, to_forecast, env, result, now, prune_failures, refore)
     open_new = {k: 0 for k in budget.KINDS}
     for name, _ in to_forecast:
         open_new[budget.kind_of(name)] += 1
@@ -358,6 +372,7 @@ async def run(
     if decision.remaining is not None and provider == "openai":
         to_forecast = _openai_plan(to_forecast, lookup, decision, day, env, result, mode, now, open_new)
     result.llm_needed = bool(to_forecast)
+    re_urls = {q.page_url for _, q in to_forecast if _qkey(q) in refore}
 
     if to_forecast and (not decision.may_call_llm or result.pacing is None):
         result.outcomes = [
@@ -371,14 +386,17 @@ async def run(
         stop = asyncio.Event()
 
         async def one(name: str, q: Any) -> Outcome:
+            redo = _qkey(q) in refore
+            skey = _skey(q, refore)
             async with sem:
                 if store is not None and not stop.is_set():  # write-ahead (v0.1.3): the +1 hits the disk first
-                    store.begin_attempt(_qkey(q), q.question_text, q.page_url, now)
+                    store.begin_attempt(skey, q.question_text, q.page_url, now)
                 outcome = await forecast_one(
                     bots[budget.kind_of(name)], client, name, q, publish, key_lookup_fn, env, stop, result, store
                 )
-                _count_failure(store, name, q, outcome, now)
+                _count_failure(store, name, q, outcome, now, skey)
                 outcome.key = _qkey(q)
+                outcome.reforecast = redo
                 return outcome
 
         head = [await one(*to_forecast[0])] if serial_first else []
@@ -386,6 +404,9 @@ async def run(
         if probe_fn is not None and _upstream_suspect(result.outcomes):
             await _health_probe(probe_fn, result, next(iter(prices.values()))[1], store, stop)
 
+    for o in result.outcomes:  # budget-skipped / stopped re-forecasts never reached `one`
+        if not o.reforecast and o.url in re_urls:
+            o.reforecast = True
     result.outcomes += closing
     after = key_lookup_fn().info if (decision.may_call_llm and to_forecast) else lookup.info
     if after is not None:
@@ -418,6 +439,21 @@ def _openai_plan(to_forecast: list[tuple[str, Any]], lookup: budget.KeyLookup, d
 
 def _qkey(q: Any) -> str:
     return state_mod.question_key(q.id_of_question, q.id_of_post)
+
+
+def _skey(q: Any, refore: set[str] | frozenset[str] = frozenset()) -> str:
+    """Stop-loss key: a re-forecast counts on its own key (v0.4.6), never on the question's."""
+    key = _qkey(q)
+    return precheck.reforecast_key(key) if key in refore else key
+
+
+def last_forecast(q: Any) -> datetime | None:
+    """v0.4.6: this bot's latest forecast time from the API json the SDK keeps (MetaculusQuestion.api_json):
+    question.my_forecasts.latest.start_time — the field of the SDK's timestamp_of_my_last_forecast."""
+    api = getattr(q, "api_json", None)
+    if not isinstance(api, dict):
+        return None
+    return precheck.last_forecast_time(api.get("question"))
 
 
 async def _health_probe(probe_fn: Callable[[], Awaitable[Any]], result: RunResult,
@@ -456,35 +492,37 @@ def _upstream_suspect(outcomes: list[Outcome]) -> bool:
 
 
 def _drop_failing(store: Any, to_forecast: list[tuple[str, Any]], env: dict[str, str],
-                  result: RunResult, now: datetime | None = None, prune: bool = True) -> list[tuple[str, Any]]:
+                  result: RunResult, now: datetime | None = None, prune: bool = True,
+                  refore: set[str] | frozenset[str] = frozenset()) -> list[tuple[str, Any]]:
     """Stop-loss: questions that failed MAX_QUESTION_FAILED_RUNS runs in a row get no LLM call,
-    until SKIP_COOLDOWN_HOURS after their last attempt (then one more try)."""
-    result.forecast_keys = {_qkey(q) for _, q in to_forecast}
+    until SKIP_COOLDOWN_HOURS after their last attempt (then one more try). Re-forecasts use their own key."""
+    result.forecast_keys = {_skey(q, refore) for _, q in to_forecast}
     if prune and not result.fetch_errors:  # a tournament we could not read must not wipe its counts
-        store.prune_failures({_qkey(q) for _, q in to_forecast})
+        store.prune_failures(set(result.forecast_keys))
     result.fail_limit = state_mod.max_failed_runs(env)
     result.cooldown_hours = state_mod.skip_cooldown_hours(env)
     waiting, _due = store.split_skipped(result.fail_limit, result.cooldown_hours, now)
     kept = []
     for name, q in to_forecast:
-        item = waiting.get(_qkey(q))
+        item = waiting.get(_skey(q, refore))
         if item is None:
             kept.append((name, q))
         else:
             result.skipped_failing.append(
-                {"id": _qkey(q), "title": q.question_text, "url": q.page_url,
+                {"id": _skey(q, refore), "title": q.question_text, "url": q.page_url,
                  "count": int(item["count"]), "last_error": item.get("last_error", ""),
                  "next_retry": item["next_retry"]}
             )
     return kept
 
 
-def _count_failure(store: Any, tournament: str, q: Any, outcome: Outcome, now: datetime | None = None) -> None:
+def _count_failure(store: Any, tournament: str, q: Any, outcome: Outcome, now: datetime | None = None,
+                   key: str | None = None) -> None:
     """The +1 was written before the attempt. A forecast = reset; a real failure keeps it and records why;
     401/402, stopped and skipped_budget take it back."""
     if store is None:
         return
-    key = _qkey(q)
+    key = key or _qkey(q)
     if outcome.status == "failed" and not outcome.fatal:
         store.finish_failure(key, outcome.detail.split(" | ")[-1], now)
     elif outcome.status in ("submitted", "comment_failed", "dry_run"):
@@ -678,7 +716,8 @@ def render_summary(r: RunResult, with_header: bool = True, section: str | None =
     lines += [
         f"- 開放題：{sum(r.open_counts.values())}（{counts}）",
         f"- 已預測跳過：{r.already_forecasted}；不支援題型跳過：{r.unsupported}",
-        f"- 這輪新交：{r.new_ok}" + ("" if r.publish else "（dry run，沒送）"),
+        f"- 這輪新交：{r.new_ok - r.reforecast_ok}" + ("" if r.publish else "（dry run，沒送）"),
+        f"- 截止前重答：{r.reforecast_ok}",
         f"- 失敗：{r.failed}",
         f"- 說明沒送出：{comment_failed}",
         f"- 臨截止跳過（不花 LLM）：{r.count('skipped_closing')}；作答期間已截止（沒送出）：{r.count('closed')}",
@@ -698,7 +737,8 @@ def render_summary(r: RunResult, with_header: bool = True, section: str | None =
     done = [o for o in r.outcomes if o.status in ("submitted", "comment_failed", "dry_run")]
     if done:
         lines += ["", f"{sub} 這輪預測的題目"]
-        lines += [f"- [{o.title}]({o.url})（{o.tournament}，約 {_money(o.cost)}）" for o in done]
+        lines += [f"- [{o.title}]({o.url})（{o.tournament}，約 {_money(o.cost)}）" + ("（重答）" if o.reforecast else "")
+                  for o in done]
     if with_header and section is None:  # no precheck listing above (Test Bot): print open/close times here (C4)
         lines += _windows(r.windows)
     return "\n".join(lines) + "\n"

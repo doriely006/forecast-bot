@@ -692,3 +692,106 @@ def test_is_closed_error_detection():
     assert runner.is_closed_error(RuntimeError('{"error":"Question 1 is already closed to forecasting !"}'))
     assert runner.is_closed_error(RuntimeError("HTTP 405 Method Not Allowed"))
     assert not runner.is_closed_error(RuntimeError("HTTP 500 server error"))
+
+
+# ---- v0.4.6: re-forecast once before close (spot scoring)
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz  # noqa: E402
+
+_CLOCK = _dt(2026, 10, 16, tzinfo=_tz.utc)  # do_run pins today=10-16 -> clock 00:00 UTC
+
+
+def _answered(close, last, qid=2203, text="Fixture question answered before", open_t=None):
+    q = load_fixture_questions()["MiniBench"][2].model_copy(deep=True)
+    q.question_text, q.close_time, q.already_forecasted = text, close, True
+    q.id_of_question, q.id_of_post = qid, qid - 2000
+    q.page_url = f"https://example.invalid/questions/{qid - 2000}/"
+    if open_t is not None:
+        q.open_time = open_t
+    q.api_json = {"question": {"my_forecasts": {"history": [{"start_time": last.timestamp()}],
+                                                "latest": {"start_time": last.timestamp()}}}}
+    return q
+
+
+def _mini(*qs):
+    return FakeClient({"FutureEval Fall 2026": [], "MiniBench": list(qs)})
+
+
+def test_reforecast_inside_window_not_yet_reanswered(fake_llm):
+    q = _answered(_CLOCK + _td(hours=6), _CLOCK - _td(days=2))
+    client = _mini(q)
+    r = do_run(client, publish=True)
+    (o,) = r.outcomes
+    assert o.status == "submitted" and o.reforecast and r.reforecast_due == 1 and r.already_forecasted == 0
+    assert [qid for _, qid, _ in client.predictions] == [2203] and fake_llm.calls
+    text = runner.render_summary(r)
+    assert "截止前重答：1" in text and "這輪新交：0" in text and "（重答）" in text
+
+
+def test_no_reforecast_when_already_reanswered_inside_window(fake_llm):
+    q = _answered(_CLOCK + _td(hours=6), _CLOCK - _td(hours=2))  # window opened 10-15 18:00, answered 22:00
+    r = do_run(_mini(q), publish=True)
+    assert r.outcomes == [] and r.already_forecasted == 1 and not fake_llm.calls
+    assert "截止前重答：0" in runner.render_summary(r)
+
+
+def test_no_reforecast_outside_window(fake_llm):
+    q = _answered(_CLOCK + _td(hours=30), _CLOCK - _td(days=3))
+    r = do_run(_mini(q), publish=True)
+    assert r.outcomes == [] and r.already_forecasted == 1 and not fake_llm.calls
+
+
+def test_short_question_answered_at_open_is_never_reforecast(fake_llm):  # FutureEval ~1.5 h, MiniBench
+    q = _answered(_CLOCK + _td(minutes=40), _CLOCK - _td(minutes=45), open_t=_CLOCK - _td(minutes=50))
+    r = do_run(_mini(q), publish=True)
+    assert r.outcomes == [] and r.already_forecasted == 1 and not fake_llm.calls
+
+
+def test_reforecast_switch_zero_turns_it_off(fake_llm):
+    q = _answered(_CLOCK + _td(hours=6), _CLOCK - _td(days=2))
+    r = do_run(_mini(q), publish=True, env={"REFORECAST_HOURS_BEFORE_CLOSE": "0"})
+    assert r.outcomes == [] and r.already_forecasted == 1 and not fake_llm.calls
+    r = do_run(_mini(q.model_copy(deep=True)), publish=True, env={"REFORECAST_HOURS_BEFORE_CLOSE": "3"})
+    assert r.outcomes == []  # 3 h window starts 10-16 03:00, clock 00:00
+    r = do_run(_mini(q.model_copy(deep=True)), publish=True, env={"REFORECAST_HOURS_BEFORE_CLOSE": "x"})
+    assert r.reforecast_ok == 1  # bad value -> default 12
+
+
+def test_reforecast_without_last_forecast_time_is_skipped(fake_llm):  # unknown -> rather not than every run
+    q = _answered(_CLOCK + _td(hours=6), _CLOCK - _td(days=2))
+    q.api_json = {}
+    r = do_run(_mini(q), publish=True)
+    assert r.outcomes == [] and r.already_forecasted == 1
+
+
+def test_reforecast_still_respects_closing_skip(fake_llm):
+    q = _answered(_CLOCK + _td(minutes=5), _CLOCK - _td(days=2))
+    r = do_run(_mini(q), publish=True)
+    assert [o.status for o in r.outcomes] == ["skipped_closing"] and not fake_llm.calls
+
+
+def test_new_question_before_reforecast_when_budget_runs_out(fake_llm):
+    redo = _answered(_CLOCK + _td(hours=2), _CLOCK - _td(days=2), qid=2290, text="Answered question due again")
+    fresh = load_fixture_questions()["MiniBench"][2].model_copy(deep=True)
+    fresh.question_text, fresh.close_time = "Brand new fixture question", _CLOCK + _td(days=5)
+    calls = []
+
+    def key_fn():  # run start + first question ok, then the budget is gone
+        calls.append(1)
+        return key() if len(calls) <= 2 else key(remaining=0.0)
+
+    client = _mini(redo, fresh)
+    r = do_run(client, publish=True, key_fn=key_fn, concurrency=1)
+    by = {o.title: o for o in r.outcomes}
+    assert by["Brand new fixture question"].status == "submitted"
+    assert by["Answered question due again"].status == "skipped_budget" and by["Answered question due again"].reforecast
+    assert [qid for _, qid, _ in client.predictions] == [2203]
+
+
+def test_failing_reforecast_counts_on_its_own_key(fake_llm, tmp_path):
+    q = _answered(_CLOCK + _td(hours=6), _CLOCK - _td(days=2), text="ALWAYSFAILS answered before")
+    store = state.PendingComments.load(tmp_path)
+    r = do_run(_mini(q), publish=True, store=store)
+    (o,) = r.outcomes
+    assert o.status == "failed" and o.reforecast
+    again = state.PendingComments.load(tmp_path)
+    assert again.failed_runs("2203") == 0 and again.failed_runs("re:2203") == 1

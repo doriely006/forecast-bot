@@ -1,6 +1,6 @@
 # forecast-bot
 
-v0.4.5. A low-cost, fully automated Metaculus bot for the Fall 2026 FutureEval tournament, MiniBench and Market Pulse 26Q4.
+v0.4.6. A low-cost, fully automated Metaculus bot for the Fall 2026 FutureEval tournament, MiniBench and Market Pulse 26Q4.
 Market Pulse 26Q4 (tournament id `market-pulse-26q4`, spot scoring, 12 question groups / 65 questions, all resolved by 12-31) counts as a "main" tournament for budget and pacing; group questions are unpacked into one forecast per subquestion.
 Based on [Metaculus/metac-bot-template](https://github.com/Metaculus/metac-bot-template) at
 `096cb207d643da3090c4830cd828255bf18da2d5` (2026-10-15), forecasting-tools 0.3.4 (locked; `>=0.3.0,<0.4.0`),
@@ -108,6 +108,7 @@ Secrets: `METACULUS_TOKEN`, and one of `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`
 | `MAX_QUESTION_FAILED_RUNS` | consecutive failed runs before a question is skipped | 3 |
 | `SKIP_COOLDOWN_HOURS` | wait before a skipped question gets another try | 6 |
 | `MIN_MINUTES_BEFORE_CLOSE` | questions closing within this many minutes are skipped before any LLM call | 10 |
+| `REFORECAST_HOURS_BEFORE_CLOSE` | an already-answered question is researched and forecast once more when it enters the last this-many hours before close and the bot's latest forecast is older than that window (spot scoring); `0` turns it off | 12 |
 | `DRY_RUN_LLM_MAX_QUESTIONS` | questions used by a manual `dry_run_llm` run | 2 |
 | `TEST_MAX_QUESTIONS` | questions used by the Test Bot workflow | 3 |
 | `MAIN_FORECAST_MODEL` | final-forecast model, main tournament | `openai/gpt-6.1-sol` |

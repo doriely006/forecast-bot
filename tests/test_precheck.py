@@ -237,3 +237,59 @@ def test_cooldown_decides_whether_a_skipped_question_is_work(tmp_path):  # v0.1.
     store.failures["51"].pop("last_attempt")
     store.save()
     assert run(env(PUBLISH="1"), api=api, tmp=tmp_path, now=t0)[1] is True
+
+
+# ---- v0.4.6: re-forecast window as work; group subquestions filtered by their own status / window
+T_NOW = datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc)
+
+
+def answered(qid, close, last, **kw):
+    x = q(qid, forecasted=True, open_t="2026-11-01T00:00:00Z", close_t=close, **kw)
+    x["my_forecasts"] = {"history": [{"start_time": last.timestamp()}], "latest": {"start_time": last.timestamp()}}
+    return x
+
+
+def test_reforecast_due_question_is_work(tmp_path):
+    api = Api(main=MAIN + [post(6, answered(61, "2026-11-20T18:00:00Z", T_NOW - timedelta(days=5)))])
+    code, work, text = run(env(PUBLISH="1"), api=api, tmp=tmp_path, now=T_NOW)
+    assert code == 0 and work is True and "截止前重答：1" in text and "還沒預測 0" in text
+
+
+def test_reforecast_not_work_when_reanswered_outside_window_or_off(tmp_path):
+    done = Api(main=MAIN + [post(6, answered(61, "2026-11-20T18:00:00Z", T_NOW - timedelta(hours=1)))])
+    code, work, text = run(env(PUBLISH="1"), api=done, tmp=tmp_path, now=T_NOW)
+    assert work is False and "截止前重答：0" in text
+    far = Api(main=MAIN + [post(6, answered(61, "2026-11-22T18:00:00Z", T_NOW - timedelta(days=5)))])
+    assert run(env(PUBLISH="1"), api=far, tmp=tmp_path, now=T_NOW)[1] is False
+    due = Api(main=MAIN + [post(6, answered(61, "2026-11-20T18:00:00Z", T_NOW - timedelta(days=5)))])
+    assert run(env(PUBLISH="1", REFORECAST_HOURS_BEFORE_CLOSE="0"), api=due, tmp=tmp_path, now=T_NOW)[1] is False
+    closing = Api(main=MAIN + [post(6, answered(61, "2026-11-20T12:05:00Z", T_NOW - timedelta(days=5)))])
+    assert run(env(PUBLISH="1"), api=closing, tmp=tmp_path, now=T_NOW)[1] is False  # MIN_MINUTES_BEFORE_CLOSE
+
+
+def test_short_question_is_never_due_for_reforecast():
+    close = datetime(2026, 11, 20, 13, 0, tzinfo=timezone.utc)
+    assert not precheck.reforecast_due(True, close, close - timedelta(minutes=80), T_NOW, 12)
+    assert precheck.reforecast_due(True, close, close - timedelta(hours=13), T_NOW, 12)
+    assert not precheck.reforecast_due(True, close, None, T_NOW, 12)
+    assert precheck.reforecast_hours({}) == 12 and precheck.reforecast_hours({"REFORECAST_HOURS_BEFORE_CLOSE": "-1"}) == 12
+
+
+def test_last_forecast_time_reads_latest_then_history_and_iso():
+    t = datetime(2026, 11, 1, 3, 0, tzinfo=timezone.utc)
+    assert precheck.last_forecast_time({"my_forecasts": {"latest": {"start_time": t.timestamp()}}}) == t
+    assert precheck.last_forecast_time({"my_forecasts": {"latest": None, "history": [
+        {"start_time": "2026-10-30T00:00:00Z"}, {"start_time": t.timestamp()}]}}) == t
+    assert precheck.last_forecast_time({"my_forecasts": {"history": []}}) is None
+    assert precheck.last_forecast_time({}) is None
+
+
+def test_group_subquestions_closed_or_upcoming_are_not_open(tmp_path):
+    group = post(7, dict(q(71, open_t="2026-11-19T00:00:00Z", close_t="2026-11-21T00:00:00Z"), status="open"),
+                 dict(q(72, open_t="2026-11-10T00:00:00Z", close_t="2026-11-21T00:00:00Z"), status="closed"),
+                 dict(q(73, open_t="2026-11-25T00:00:00Z", close_t="2026-11-30T00:00:00Z"), status="upcoming"),
+                 q(74, open_t="2026-11-10T00:00:00Z", close_t="2026-11-18T00:00:00Z"))  # no status: by its window
+    items = precheck.flatten_post(group, "Market Pulse 26Q4", T_NOW)
+    assert [it.question_id for it in items] == [71]
+    code, work, text = run(env(PUBLISH="1"), api=Api(main=[group], mini1=[], mini2=[]), tmp=tmp_path, now=T_NOW)
+    assert work is True and "開放題：1" in text and "還沒預測 1" in text

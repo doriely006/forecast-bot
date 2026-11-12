@@ -2,12 +2,23 @@
 
 ## 收工日誌
 
+### 2026-11-12 v0.4.6 截止前重答一次
+- 條件（全賽事同規則）：已預測＋`close-H <= now < close`＋最後一筆預測早於 `close-H`；H＝env `REFORECAST_HOURS_BEFORE_CLOSE`（預設 12，壞值／<0 回 12，"0"＝關）。`precheck.reforecast_due`，runner 共用。MIN_MINUTES_BEFORE_CLOSE 臨截止跳過照舊在前。
+- 最後預測時間：`api_json["question"]["my_forecasts"]["latest"]["start_time"]`（SDK `data_models/questions.py:293-299` `timestamp_of_my_last_forecast` 讀的欄位），沒有再退 history 最大 start_time；數字＝unix 秒、字串＝ISO 都吃。group 展開後 SDK 把 subquestion json 放進 `question`，同欄位可用。無狀態，`.state` 不記；讀不到＝不重答。
+- 短題：首答本來就在視窗內 -> 不重答（測試鎖）。
+- runner：重答題進 to_forecast，排序（是否重答, close）＝新題先；配速／tier／skipped_budget／stopped 照舊。失敗計數用獨立 key `re:<key>`（`precheck.reforecast_key`），重答失敗不會把原題打成壞題，連敗照 MAX_QUESTION_FAILED_RUNS 停。`Outcome.reforecast`；Summary「截止前重答：N」、「這輪新交」扣掉重答、題目清單標「（重答）」。
+- precheck：重答到期題（扣掉臨截止）算 work，同樣用 `re:` key 判冷卻；加「截止前重答：N」行。group subquestion：`status` 有值且≠open 剔除，再照自己的 open／close 對 now 剔除（runner 的 SDK 是照 subquestion status 濾）。
+- yaml×2、README 變數表加 `REFORECAST_HOURS_BEFORE_CLOSE`。版號 0.4.6（pyproject／main／precheck／README／test_workflows_and_repo）。
+- 測試 240 passed（舊 226 只改版號斷言；新 14：test_runner 9、test_precheck 5）。
+- 已知：precheck `pacing_lines` 題數只算未預測題、沒算重答題（runner 有算），配速行可能比實跑樂觀一點。OpenAI 路徑免費額度用完時新題可被延後、重答題（≤12h 截止）照付費 minimum 跑——延後不算預算不足，沒改。
+- 沒驗：真 API 的 `my_forecasts.latest.start_time` 型別（SDK 假設 unix 秒，兩種都吃）；真 Market Pulse 視窗內重答 run；precheck group 過濾後題數＝runner（真 API 69 vs 5 那個情境沒重跑）。
+
 ### 2026-11-12 收尾：變數現值＋真跑驗證（run 43231898167，v0.4.5，success）
 - repo variable 現值（以 `gh variable list` 為準）：`MAIN_LLM_PROVIDER=anthropic`、`MINIBENCH_LLM_PROVIDER=anthropic`、`LLM_PROVIDER=openai`（備援）、`ANTHROPIC_BUDGET_USD=80`、`ANTHROPIC_CREDIT_RESET_DAY=1`、`MINIBENCH_MINIMUM_AFTER_SPLIT=0`、`MAIN_BUDGET_SHARE=0.5`。
 - 真跑：共用路徑起得來（「全部賽事同一個 provider（共用一份預算）」）；main／minibench 都 Opus x5（$0.52／題 -> full，估 $0.47）；研究 Haiku。Market Pulse 5 題新交、失敗 0、花 $1.09（實測約 $0.22／題 full）。`RESEARCH` 段 5 筆有印出。
 - 中途事故：先設 MAIN_LLM_PROVIDER 時（v0.4.3）單一路徑無備援＋C6 把 MiniBench 壓成 minimum（run 43229870890 precheck，0 開放題、沒交題），當場刪變數止血，v0.4.4 修完才重開。
 - Haiku 研究初看（只讀了 46016 一題）：對題、有日期、引 SEC／NVIDIA 原始稿、有 base rate。正式複查仍待累積 8～10 題。
-- 🟡 precheck 把 Market Pulse 已截止／未開的 subquestion 也算開放（列 69、實際可答 5）-> 每 20 分鐘都判有工作、job 空轉（不花 LLM）。修法：precheck 展開 group 時照 subquestion 自己的 open／close 時間過濾。
+- ~~🟡 precheck 把 Market Pulse 已截止／未開的 subquestion 也算開放（列 69、實際可答 5）-> 每 20 分鐘都判有工作、job 空轉（不花 LLM）。修法：precheck 展開 group 時照 subquestion 自己的 open／close 時間過濾。~~ v0.4.6 已做。
 - 🟡 Market Pulse 榜沒接進 standings.py。
 - 沒驗：備援真觸發；Console 與本機帳對帳（本機 11-01 起從 $0 算，Console 11 月另有 $1.56）。
 
@@ -18,7 +29,7 @@
 - 題量估計：`budget.questions_per_day` 是 env 預設 4.0（`MAIN_QUESTIONS_PER_DAY`），不是寫死 per kind。65 題／約 50 天≈1.3 題／天，main 估計偏低約 25%，且 `open_unforecasted` 取 max 已涵蓋開題當下的量，偏差不大，沒調。
 - 測試：226 passed（舊 225，新 1：test_precheck 的 kind／清單測試）；改 3 處既有：TOURNAMENTS 對照斷言、precheck 假 Api 加第三賽事回空、test_split_provider 共用群組賽事數 2->3。版號 0.4.5（pyproject／main／precheck／README／test_workflows_and_repo）。
 - 沒驗：真 API 的 market-pulse-26q4 slug 抓題（MiniBench 同法但 Market Pulse 沒打過）；subquestion 的實際題型是否都在 SUPPORTED_TYPES；真 run 的配速表現。
-- 待辦：Market Pulse 是 spot scoring（只算截止當下），bot 每題只答一次、開題時答的到截止會過期 -> 截止前重答一次（未做）。
+- ~~待辦：Market Pulse 是 spot scoring（只算截止當下），bot 每題只答一次、開題時答的到截止會過期 -> 截止前重答一次（未做）。~~ v0.4.6 已做。
 
 ### 2026-11-12 v0.4.4 共用 provider 路徑掛備援＋MiniBench minimum 開關＋Anthropic 估價校準
 - 起因：run 43229870890（MAIN＝MINIBENCH＝anthropic、全域 openai）走單一路徑＝無 v0.4.1 備援＋C6 MiniBench minimum。

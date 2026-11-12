@@ -23,13 +23,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 import budget
 import state as state_mod
 
-VERSION = "0.4.5"
+VERSION = "0.4.6"
 SWITCHES = ("BOT_ENABLED", "PUBLISH", "DRY_RUN_LLM")
 # Must equal forecasting_tools.MetaculusClient.CURRENT_AI_COMPETITION_ID /
 # CURRENT_MINIBENCH_ID (asserted in tests).
@@ -75,6 +75,7 @@ class QItem:
     open_time: str | None
     close_time: str | None
     forecasted: bool  # same rule as the SDK: my_forecasts.history non-empty
+    last_forecast: datetime | None = None  # v0.4.6: my latest forecast (re-forecast window check)
 
     @property
     def url(self) -> str:
@@ -102,7 +103,80 @@ def _forecasted(q: dict[str, Any]) -> bool:
     return bool(history)
 
 
-def flatten_post(post: dict[str, Any], tournament: str) -> list[QItem]:
+DEFAULT_REFORECAST_HOURS = 12.0
+
+
+def reforecast_hours(env: dict[str, str]) -> float:
+    """v0.4.6 REFORECAST_HOURS_BEFORE_CLOSE: unset / empty / not a number / < 0 -> 12; 0 = feature off."""
+    try:
+        value = float(str(env.get("REFORECAST_HOURS_BEFORE_CLOSE", "")).strip())
+    except ValueError:
+        return DEFAULT_REFORECAST_HOURS
+    return value if value >= 0 else DEFAULT_REFORECAST_HOURS
+
+
+def _stamp_time(value: Any) -> datetime | None:
+    """A Metaculus forecast start_time: unix seconds (what the SDK assumes) or an ISO string."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    try:
+        t = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            return datetime.fromtimestamp(float(value), timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def last_forecast_time(q: dict[str, Any] | None) -> datetime | None:
+    """v0.4.6: time of this bot's latest forecast on one question json: my_forecasts.latest.start_time (the field
+    forecasting_tools reads in MetaculusQuestion.timestamp_of_my_last_forecast), else the latest history entry."""
+    try:
+        mine = (q or {}).get("my_forecasts") or {}
+    except AttributeError:
+        return None
+    if not isinstance(mine, dict):
+        return None
+    latest = mine.get("latest")
+    t = _stamp_time(latest.get("start_time")) if isinstance(latest, dict) else None
+    if t is not None:
+        return t
+    times = [_stamp_time(h.get("start_time")) for h in (mine.get("history") or []) if isinstance(h, dict)]
+    times = [x for x in times if x is not None]
+    return max(times) if times else None
+
+
+def reforecast_due(forecasted: bool, close: datetime | None, last: datetime | None, now: datetime,
+                   hours: float) -> bool:
+    """v0.4.6 (every tournament alike): answered before, now inside the last `hours` before close, and the latest
+    forecast is older than the window start. Unknown last-forecast time -> no (better no re-forecast than one per run).
+    A question whose whole open window is shorter than `hours` was first answered inside the window -> never."""
+    if hours <= 0 or not forecasted or close is None or last is None:
+        return False
+    start = close - timedelta(hours=hours)
+    return start <= now < close and last < start
+
+
+def _sub_open(q: dict[str, Any], now: datetime | None) -> bool:
+    """Group subquestions: the post is 'open' but each subquestion has its own status and window (runner's SDK
+    filters on the subquestion status). status other than open -> out; with `now`, outside open/close -> out."""
+    status = q.get("status")
+    if status is not None and status != "open":
+        return False
+    if now is not None:
+        o, c = _when(q.get("open_time")), _when(q.get("scheduled_close_time"))
+        if (o is not None and o > now) or (c is not None and c <= now):
+            return False
+    return True
+
+
+def flatten_post(post: dict[str, Any], tournament: str, now: datetime | None = None) -> list[QItem]:
     if "notebook" in post:
         return []
     pid, title = post["id"], post.get("title", "")
@@ -110,16 +184,48 @@ def flatten_post(post: dict[str, Any], tournament: str) -> list[QItem]:
     if group:
         return [
             QItem(tournament, pid, q.get("id"), q.get("type", "?"), f"{title} / {q.get('label', '')}",
-                  q.get("open_time"), q.get("scheduled_close_time"), _forecasted(q))
-            for q in group.get("questions", [])
+                  q.get("open_time"), q.get("scheduled_close_time"), _forecasted(q), last_forecast_time(q))
+            for q in group.get("questions", []) if _sub_open(q, now)
         ]
     if post.get("conditional"):
         yes = post["conditional"].get("question_yes", {})
         return [QItem(tournament, pid, None, "conditional", title, yes.get("open_time"),
-                      yes.get("scheduled_close_time"), _forecasted(yes))]
+                      yes.get("scheduled_close_time"), _forecasted(yes), last_forecast_time(yes))]
     q = post.get("question") or {}
     return [QItem(tournament, pid, q.get("id"), q.get("type", "?"), title,
-                  q.get("open_time"), q.get("scheduled_close_time"), _forecasted(q))]
+                  q.get("open_time"), q.get("scheduled_close_time"), _forecasted(q), last_forecast_time(q))]
+
+
+REFORECAST_KEY_PREFIX = "re:"
+
+
+def reforecast_key(key: str) -> str:
+    """v0.4.6: stop-loss counter of a re-forecast lives on its own key, so a failing re-forecast never marks the
+    question itself as broken (and still stops retrying after MAX_QUESTION_FAILED_RUNS runs)."""
+    return REFORECAST_KEY_PREFIX + key
+
+
+def min_minutes_before_close(env: dict[str, str]) -> int:
+    """Same rule as runner.min_minutes_before_close (precheck cannot import runner)."""
+    try:
+        value = int(str(env.get("MIN_MINUTES_BEFORE_CLOSE", "")).strip())
+    except ValueError:
+        return 10
+    return value if value >= 0 else 10
+
+
+def due_reforecasts(items: list[QItem], env: dict[str, str], now: datetime) -> list[QItem]:
+    """v0.4.6: supported, already answered, inside the re-forecast window and not re-answered yet; questions the
+    run would skip as closing (MIN_MINUTES_BEFORE_CLOSE) are not work."""
+    hours = reforecast_hours(env)
+    cutoff = now + timedelta(minutes=min_minutes_before_close(env))
+    out = []
+    for it in items:
+        close = _when(it.close_time)
+        if it.supported and reforecast_due(it.forecasted, close, it.last_forecast, now, hours) \
+                and not (close is not None and close <= cutoff):
+            out.append(it)
+    return out
 
 
 class FetchError(Exception):
@@ -135,6 +241,7 @@ def fetch_open_items(
     get_json: Callable[..., Any] = budget.http_get_json,
     sleep: Callable[[float], None] = time.sleep,
     base: str | None = None,
+    now: datetime | None = None,
 ) -> list[QItem]:
     base = (base or os.environ.get("METACULUS_API_BASE_URL") or API_BASE).rstrip("/")
     items: list[QItem] = []
@@ -153,7 +260,7 @@ def fetch_open_items(
             raise FetchError(e.__class__.__name__) from None
         results = data.get("results", [])
         for post in results:
-            items.extend(flatten_post(post, tournament))
+            items.extend(flatten_post(post, tournament, now))
         if not data.get("next") or not results:
             return items
         offset += 100
@@ -412,6 +519,7 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
         lines += _block("WARNING", w)
 
     token = env.get("METACULUS_TOKEN", "")
+    now = deps.now()
     items: list[QItem] = []
     fetch_errors: list[str] = []
     counts: dict[str, int] = {}
@@ -420,7 +528,7 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
     else:
         for name, tid in TOURNAMENTS:  # B12: each tournament on its own
             try:
-                got = fetch_open_items(name, tid, token, deps.get_json, deps.sleep)
+                got = fetch_open_items(name, tid, token, deps.get_json, deps.sleep, now=now)
                 items += got
                 counts[name] = len(got)
             except FetchError as e:
@@ -447,20 +555,29 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
     cooldown = state_mod.skip_cooldown_hours(env)
     # v0.1.2/3: questions that failed MAX_QUESTION_FAILED_RUNS runs in a row are not "work"
     # until SKIP_COOLDOWN_HOURS after their last attempt; then they are work again (one more try)
-    dead, _due = store.split_skipped(fail_limit, cooldown, deps.now())
-    todo = [it for it in items if it.supported and not it.forecasted]
-    new = [it for it in todo if state_mod.question_key(it.question_id, it.post_id) not in dead]
+    dead, _due = store.split_skipped(fail_limit, cooldown, now)
+    redue = due_reforecasts(items, env, now)  # v0.4.6: answered before, inside the window, not yet re-answered
+    todo = [it for it in items if it.supported and not it.forecasted] + redue
+    re_ids = {id(it) for it in redue}
+
+    def skey(it: QItem) -> str:
+        k = state_mod.question_key(it.question_id, it.post_id)
+        return reforecast_key(k) if id(it) in re_ids else k
+
+    new = [it for it in todo if skey(it) not in dead]
     stuck = [
         {"id": k, "title": it.title, "url": it.url, "count": int(dead[k]["count"]),
          "last_error": dead[k].get("last_error", ""), "next_retry": dead[k]["next_retry"]}
         for it in todo
-        if (k := state_mod.question_key(it.question_id, it.post_id)) in dead
+        if (k := skey(it)) in dead
     ]
+    re_count = sum(id(it) in re_ids for it in new)
     unsupported = [it for it in items if not it.supported]
     dry_llm = env.get("DRY_RUN_LLM", "") == "1" and event == "workflow_dispatch"
     per = "、".join(f"{k} {v}" for k, v in counts.items()) or "無"
     open_line = (f"- 開放題：{len(items)}（{per}）；已預測 {sum(it.forecasted for it in items)}；"
-                 f"還沒預測 {len(new)}；不支援的題型跳過 {len(unsupported)}")
+                 f"還沒預測 {len(new) - re_count}；不支援的題型跳過 {len(unsupported)}\n"
+                 f"- 截止前重答：{re_count}")
     for note in [n for _, n in plan.values() if n]:
         lines += _block("WARNING", note)
     if len({p for p, _ in plan.values()}) == 1:  # one provider for both (unset vars: as before)
