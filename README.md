@@ -1,6 +1,6 @@
 # forecast-bot
 
-v0.4.2. A low-cost, fully automated Metaculus bot for the Fall 2026 FutureEval tournament and MiniBench.
+v0.4.3. A low-cost, fully automated Metaculus bot for the Fall 2026 FutureEval tournament and MiniBench.
 Based on [Metaculus/metac-bot-template](https://github.com/Metaculus/metac-bot-template) at
 `096cb207d643da3090c4830cd828255bf18da2d5` (2026-10-15), forecasting-tools 0.3.4 (locked; `>=0.3.0,<0.4.0`),
 Python 3.12 on GitHub Actions. Spec: `docs/SPEC.md`. No human edits any individual forecast.
@@ -121,6 +121,7 @@ Secrets: `METACULUS_TOKEN`, and one of `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`
 | `LLM_PROVIDER` | `openrouter`, `anthropic` or `openai` | by which key is set (OpenRouter, Anthropic, OpenAI) |
 | `MAIN_LLM_PROVIDER` / `MINIBENCH_LLM_PROVIDER` | provider for that tournament only (own budget, pacing, ledger, stop); its key missing = stays on the global choice with a yellow note | unset = `LLM_PROVIDER` / key order |
 | `MAIN_LLM_PROVIDER_FROM` / `MINIBENCH_LLM_PROVIDER_FROM` | UTC date (`YYYY-MM-DD`) from which the per-tournament provider applies | unset = at once |
+| `LOG_RESEARCH` | `0` stops printing each question's research summary (`::group::RESEARCH`) to the Actions log | on (any other value) |
 | `ANTHROPIC_BUDGET_USD` | Anthropic budget per credit period (USD) | 90 |
 | `ANTHROPIC_CREDIT_RESET_DAY` | day of month the Anthropic credit resets (1-28) | 13 |
 | `ANTHROPIC_FORECAST_MODEL` / `ANTHROPIC_RESEARCH_MODEL` | Anthropic model ids | `claude-opus-5-5` / `claude-haiku-5-5` |

@@ -50,7 +50,8 @@ import guards  # noqa: E402
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
-VERSION = "0.4.2"
+VERSION = "0.4.3"
+RESEARCH_LOG_MAX_CHARS = 6000
 
 # Model choice (explicit candidate lists, per-tournament config) lives in
 # budget.py so the light precheck step can use it without dependencies.
@@ -629,7 +630,28 @@ class ForecastBot2026(ForecastBot):
             researcher = self.get_llm("researcher", "llm")
             web = await researcher.invoke(self._research_prompt(question))
             parts.append(f"## Web research\n{web}")
-            return "\n\n".join(parts)
+            result = "\n\n".join(parts)
+            self._log_research(question, researcher, result)
+            return result
+
+    @staticmethod
+    def _log_research(question: Any, researcher: Any, text: str) -> None:
+        """v0.4.3: print the research summary to stdout (Actions log) for later audit. Never raises."""
+        try:
+            if os.getenv("LOG_RESEARCH") == "0":
+                return
+            name = type(researcher).__name__
+            provider = {"AnthropicLlm": "anthropic", "OpenAILlm": "openai"}.get(name, "litellm")
+            model = getattr(researcher, "model", None) or "unknown"
+            body = str(text)
+            if len(body) > RESEARCH_LOG_MAX_CHARS:
+                body = (body[:RESEARCH_LOG_MAX_CHARS]
+                        + f"\n[truncated {len(body) - RESEARCH_LOG_MAX_CHARS} chars]")
+            print(f"::group::RESEARCH {question.page_url} provider={provider} model={model}")
+            print(body)
+            print("::endgroup::", flush=True)
+        except Exception:
+            pass
 
     @staticmethod
     def _research_prompt(question: MetaculusQuestion) -> str:

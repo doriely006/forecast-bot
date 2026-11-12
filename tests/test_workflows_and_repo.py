@@ -86,7 +86,7 @@ def test_version_matches_pyproject():
 
     py = (ROOT / "pyproject.toml").read_text()
     version = re.search(r'^version = "([^"]+)"', py, re.M).group(1)
-    assert version == main.VERSION == precheck.VERSION == "0.4.2"
+    assert version == main.VERSION == precheck.VERSION == "0.4.3"
 
 
 def test_workflows_locked_down():  # B6, B10, override 3
@@ -158,3 +158,67 @@ def test_prompts_have_no_banned_patterns():
     assert "bayes" not in src.lower()
     assert "persona" not in src.lower()
     assert "has NOT resolved yet" in src
+
+
+# ---- v0.4.3: research summary printed to the Actions log ----
+
+class _FakeResearcher:
+    model = "claude-haiku-5-5"
+
+    def __init__(self, text):
+        self.text = text
+
+    async def invoke(self, prompt):
+        return self.text
+
+
+def _research_bot(text):
+    import asyncio as _a
+    bot = main.ForecastBot2026.__new__(main.ForecastBot2026)
+    bot._research_limiter = _a.Semaphore(1)
+    bot.get_llm = lambda *a, **k: _FakeResearcher(text)
+    return bot
+
+
+def _run_research(bot, monkeypatch):
+    import asyncio as _a
+    from types import SimpleNamespace
+    monkeypatch.delenv("ASKNEWS_CLIENT_ID", raising=False)
+    q = SimpleNamespace(page_url="https://example.test/q/1", question_text="Q?",
+                        resolution_criteria="rc", fine_print="fp")
+    monkeypatch.setattr(main, "timing_block", lambda question: "", raising=False)
+    return _a.run(bot.run_research(q))
+
+
+def test_research_logged_by_default(monkeypatch, capsys):
+    monkeypatch.delenv("LOG_RESEARCH", raising=False)
+    out = _run_research(_research_bot("found X\nSources:\n- http://a"), monkeypatch)
+    printed = capsys.readouterr().out
+    assert "::group::RESEARCH https://example.test/q/1 provider=litellm model=claude-haiku-5-5" in printed
+    assert "found X" in printed and "Sources:" in printed
+    assert printed.rstrip().endswith("::endgroup::")
+    assert "found X" in out
+
+
+def test_research_log_off(monkeypatch, capsys):
+    monkeypatch.setenv("LOG_RESEARCH", "0")
+    _run_research(_research_bot("found X"), monkeypatch)
+    assert "RESEARCH" not in capsys.readouterr().out
+
+
+def test_research_log_truncates(monkeypatch, capsys):
+    monkeypatch.delenv("LOG_RESEARCH", raising=False)
+    out = _run_research(_research_bot("a" * 9000), monkeypatch)
+    printed = capsys.readouterr().out
+    assert "[truncated " in printed and "a" * 7000 not in printed
+    assert "a" * 9000 in out  # returned research is not truncated
+
+
+def test_research_log_failure_does_not_break(monkeypatch):
+    monkeypatch.delenv("LOG_RESEARCH", raising=False)
+
+    def boom(*a, **k):
+        raise OSError("stdout closed")
+    monkeypatch.setattr("builtins.print", boom)
+    out = _run_research(_research_bot("found X"), monkeypatch)
+    assert "found X" in out

@@ -2,6 +2,16 @@
 
 ## 收工日誌
 
+### 2026-11-12 v0.4.3 研究摘要印進 log
+- 動機：事後稽核研究段「資料新不新、對不對題」，但研究摘要只貼成 Metaculus 私人留言，Actions log 沒有。
+- 改動：`ForecastBot2026.run_research` 兩條路匯合處呼叫 `_log_research`：印 `::group::RESEARCH <page_url> provider=<anthropic|openai|litellm> model=<id>`＋研究全文（含 Sources）＋`::endgroup::`；超過 `RESEARCH_LOG_MAX_CHARS`（6000）截斷並註明截了幾字元。provider 由 researcher 類別名判斷，不改簽名。
+- 開關：env `LOG_RESEARCH`，值 "0" 才關（預設開）；兩支 workflow yaml 加一行、README 變數表加一列。只印 URL／provider／model／研究文字，不碰 key／header。
+- 印 log 全包 try/except 吞掉，不影響該題預測；回傳的研究文字不截斷。
+- 版號 0.4.3（pyproject／main／precheck／README／test_workflows_and_repo）。測試 214 passed（舊 210，新 4，加在 tests/test_workflows_and_repo.py）。
+- 沒驗：真 Actions run 的 `::group::` 摺疊顯示與實際輸出；真 API 的 researcher.model 字串；LLM 輸出裡若夾 `::` 指令字樣的影響（未過濾）。
+- 主 session 同日已改 repo variable（非本輪 code 改）：`MAIN_LLM_PROVIDER=anthropic`（正賽改走 Claude，OpenAI 當備援）；`ANTHROPIC_BUDGET_USD` 14->80；`ANTHROPIC_CREDIT_RESET_DAY` 13->1（對齊 Console 月上限 1 號歸零；API credit 每月 12 號補 $100；換期使本機帳從 $0 起算，Console 11 月實際已花 $1.56）。
+- 待辦：Haiku 研究品質複查：v0.4.3 上線後抓 log 的 RESEARCH 段 8～10 題判，再決定研究段換不換 Sonnet（取代舊「11-08 複查 Haiku 研究品質」）。
+
 ### 週檢 2026-11-08
 - 「Forecast on tournament questions」11-01 起：success 30／failure 0，每天都有成功 run；最後一輪 11-08 01:50Z（42435950328）。
 - 本週新交 28（main 11／MiniBench 17，18 輪有跑 main.py）；失敗 0；預算不足跳過 0；臨截止跳過 1（41395961163 MiniBench）。開放題時都有交，還沒預測的都在同輪交掉。
@@ -181,7 +191,7 @@
 - 第一次真跑看 log 有無 "Health probe failed"（探測沒打過真 API；誤判失敗會把毒題計數撤回）。
 - README Technical 段除了止血那段，其餘仍有 v0.1.1 以前的描述，沒逐條對過 code；下次動 README 時順手對。
 - 開 BOT_ENABLED／PUBLISH 前，user 的 Test Bot Summary 截圖要先給主 session 看過（README 第 6–8 步已寫）。
-- **11-08 複查 Haiku 研究品質（user 10-27 拍板：先跑一週）**：抽 MiniBench 11-01～07 anthropic 題（`.state/provider_log.jsonl`）的 Metaculus 說明，看 Haiku 摘要尾的 Sources：日期新不新、對不對題、有沒有漏題目關鍵事件。常抓舊聞／錯題 -> 研究段 `ANTHROPIC_RESEARCH_MODEL` 換 `claude-sonnet-5-5`（$2／$10，Haiku 20 倍單價），先報每題成本變化再換。
+- ~~**11-08 複查 Haiku 研究品質（user 10-27 拍板：先跑一週）**~~ 已由 2026-11-12 v0.4.3 那條取代：：抽 MiniBench 11-01～07 anthropic 題（`.state/provider_log.jsonl`）的 Metaculus 說明，看 Haiku 摘要尾的 Sources：日期新不新、對不對題、有沒有漏題目關鍵事件。常抓舊聞／錯題 -> 研究段 `ANTHROPIC_RESEARCH_MODEL` 換 `claude-sonnet-5-5`（$2／$10，Haiku 20 倍單價），先報每題成本變化再換。
 
 ## v0.2 清單
 - **MiniBench Claude 對照組（user 10-17 拍板）**：第一輪 MiniBench 結算後（約 11-01，C6 切便宜設定那天），MiniBench 的最終預測 model 換成 Claude（OpenRouter 上的 Anthropic 款），正賽維持 GPT。跑滿一輪 MiniBench 後，比兩邊非 metac 名次（standings.py），Claude 贏就提案正賽換。user 想押 Claude；參賽表單 models 欄已寫兩家＋這個計畫。
