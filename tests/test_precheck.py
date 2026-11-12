@@ -42,6 +42,8 @@ class Api:
             if "offset=0" in url:
                 return {"results": self.mini1, "next": "page2"}
             return {"results": self.mini2, "next": None}
+        if "tournaments=market-pulse-26q4" in url:  # v0.4.5: third tournament, no open questions
+            return {"results": [], "next": None}
         raise AssertionError(url)
 
 
@@ -175,7 +177,17 @@ def test_tournament_ids_match_sdk():
     assert precheck.TOURNAMENTS == [
         ("FutureEval Fall 2026", MetaculusClient.CURRENT_AI_COMPETITION_ID),
         ("MiniBench", MetaculusClient.CURRENT_MINIBENCH_ID),
+        ("Market Pulse 26Q4", "market-pulse-26q4"),  # v0.4.5
     ]
+
+
+def test_market_pulse_is_main_kind_and_in_tournament_mode():  # v0.4.5
+    import budget
+    import runner
+
+    assert budget.kind_of("Market Pulse 26Q4") == "main"
+    assert ("Market Pulse 26Q4", "market-pulse-26q4") in runner.tournaments_for_mode("tournament")
+    assert ("Market Pulse 26Q4", "market-pulse-26q4") not in runner.tournaments_for_mode("test_questions")
 
 
 def _fail_n(tmp_path, key, n):

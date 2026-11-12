@@ -533,7 +533,7 @@ def test_cli_hangs_the_fallback_on_the_shared_provider(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "run_split", fake_split)
     assert main.cli(["--mode", "tournament"]) == 0
     (g,) = seen["groups"]
-    assert g.provider == "anthropic" and set(g.models) == set(budget.KINDS) and len(g.tournaments) == 2
+    assert g.provider == "anthropic" and set(g.models) == set(budget.KINDS) and len(g.tournaments) == 3  # v0.4.5: + Market Pulse (main kind)
     fb = g.fallback()
     assert fb.provider == "openai" and fb.fallback is None and budget.pace_kinds(fb.env) == budget.KINDS
 

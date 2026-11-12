@@ -2,6 +2,15 @@
 
 ## 收工日誌
 
+### 2026-11-12 v0.4.5 加 Market Pulse 26Q4
+- 改動：`precheck.TOURNAMENTS` 加 `("Market Pulse 26Q4", "market-pulse-26q4")`；`budget.kind_of` 名稱不含 minibench＝"main"（跟正賽共用預算與配速；測試鎖住）。`runner.tournaments_for_mode("tournament")` 直接吃 TOURNAMENTS，所以 run／precheck／split 路徑都自動帶上。
+- group question：不用改 code。`runner.fetch_open_questions`（runner.py:74-78）已是 `group_question_mode="unpack_subquestions"`；SDK `metaculus_client.py:_unpack_group_question` 把每個 subquestion 展成一題（沿用 group 的 description／fine_print／resolution_criteria）。precheck 自己抓 API 的路徑（precheck.py:107-108）本來就處理 `group_of_questions`。question key＝`id_of_question`＋`id_of_post`，同一 post 的 subquestion 不撞。
+- standings.py：只有硬寫的兩個 board（正賽 33121／MiniBench），沒有逐賽事清單，新賽事不會觸發它；讀不到榜仍印一行就過。Market Pulse 的榜沒接（未做）。
+- 題量估計：`budget.questions_per_day` 是 env 預設 4.0（`MAIN_QUESTIONS_PER_DAY`），不是寫死 per kind。65 題／約 50 天≈1.3 題／天，main 估計偏低約 25%，且 `open_unforecasted` 取 max 已涵蓋開題當下的量，偏差不大，沒調。
+- 測試：226 passed（舊 225，新 1：test_precheck 的 kind／清單測試）；改 3 處既有：TOURNAMENTS 對照斷言、precheck 假 Api 加第三賽事回空、test_split_provider 共用群組賽事數 2->3。版號 0.4.5（pyproject／main／precheck／README／test_workflows_and_repo）。
+- 沒驗：真 API 的 market-pulse-26q4 slug 抓題（MiniBench 同法但 Market Pulse 沒打過）；subquestion 的實際題型是否都在 SUPPORTED_TYPES；真 run 的配速表現。
+- 待辦：Market Pulse 是 spot scoring（只算截止當下），bot 每題只答一次、開題時答的到截止會過期 -> 截止前重答一次（未做）。
+
 ### 2026-11-12 v0.4.4 共用 provider 路徑掛備援＋MiniBench minimum 開關＋Anthropic 估價校準
 - 起因：run 43229870890（MAIN＝MINIBENCH＝anthropic、全域 openai）走單一路徑＝無 v0.4.1 備援＋C6 MiniBench minimum。
 - 選法：單一路徑掛 fallback（不改 split 共用預算）。兩賽事同 provider 且≠`select_provider` 時 `main.make_shared_group` 包成一個 Group（無 `_PACE_KINDS`＝一次 pace、一本帳、80/20 照舊）丟 `run_split`；fallback＝同函式建全域 provider 群組（兩賽事、同 11-01 前配速）。runner／run_split 零邏輯改動，既有 215 測試除版號斷言外沒改。同 provider 且＝全域＝原路徑不變。

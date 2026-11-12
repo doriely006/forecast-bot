@@ -50,7 +50,7 @@ import guards  # noqa: E402
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
-VERSION = "0.4.4"
+VERSION = "0.4.5"
 RESEARCH_LOG_MAX_CHARS = 6000
 
 # Model choice (explicit candidate lists, per-tournament config) lives in

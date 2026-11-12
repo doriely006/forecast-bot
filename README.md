@@ -1,6 +1,7 @@
 # forecast-bot
 
-v0.4.4. A low-cost, fully automated Metaculus bot for the Fall 2026 FutureEval tournament and MiniBench.
+v0.4.5. A low-cost, fully automated Metaculus bot for the Fall 2026 FutureEval tournament, MiniBench and Market Pulse 26Q4.
+Market Pulse 26Q4 (tournament id `market-pulse-26q4`, spot scoring, 12 question groups / 65 questions, all resolved by 12-31) counts as a "main" tournament for budget and pacing; group questions are unpacked into one forecast per subquestion.
 Based on [Metaculus/metac-bot-template](https://github.com/Metaculus/metac-bot-template) at
 `096cb207d643da3090c4830cd828255bf18da2d5` (2026-10-15), forecasting-tools 0.3.4 (locked; `>=0.3.0,<0.4.0`),
 Python 3.12 on GitHub Actions. Spec: `docs/SPEC.md`. No human edits any individual forecast.
