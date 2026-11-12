@@ -271,7 +271,8 @@ def pace(
     Before BUDGET_SPLIT_DATE (default 2026-11-01, first MiniBench round
     resolved) both tournaments share one per-question budget. After it the
     main tournament gets MAIN_BUDGET_SHARE (default 0.8) of the money and
-    MiniBench always uses the cheapest tier (C6).
+    MiniBench always uses the cheapest tier (C6); v0.4.4: MINIBENCH_MINIMUM_AFTER_SPLIT=0 lets
+    MiniBench pick its tier from its own share instead.
     """
     # v0.2.0: on Anthropic the money is per credit period, so pace until the next reset, not season end
     end = horizon_end or _date(env, "SEASON_END", "2027-01-01")
@@ -297,7 +298,7 @@ def pace(
     kinds: dict[str, KindPace] = {}
     for k in sel:
         fp, cp = prices[k]
-        if after_split and k == "minibench" and not solo:
+        if after_split and k == "minibench" and not solo and minibench_minimum_after_split(env):
             tier = TIERS[-1]
         else:
             tier = next((t for t in TIERS if tier_cost(t, fp, cp, provider) <= per_q[k]), TIERS[-1])
@@ -306,6 +307,12 @@ def pace(
     left = max(0.0, remaining - stop_below)
     run_out = today + timedelta(days=int(left / daily)) if daily > 0 else None
     return Pacing(kinds, after_split, run_out)
+
+
+def minibench_minimum_after_split(env: dict[str, str]) -> bool:
+    """C6 switch (v0.4.4): after BUDGET_SPLIT_DATE MiniBench is forced to the minimum tier unless
+    MINIBENCH_MINIMUM_AFTER_SPLIT is "0"."""
+    return (env.get("MINIBENCH_MINIMUM_AFTER_SPLIT") or "1").strip() != "0"
 
 
 def kind_of(tournament_name: str) -> str:
@@ -439,11 +446,15 @@ CACHE_WRITE_MULT = 1.25  # ASSUMPTION: 5-minute cache write = 1.25x input (the b
 CACHE_READ_MULT = 0.10  # ASSUMPTION: cache read = 0.1x input (Opus 5.5 is 0.05x; 0.1x errs high)
 ANTHROPIC_WEB_SEARCH_COST = 0.01  # $10 per 1,000 searches (web search tool docs, checked 2026-10-23)
 
-# Token assumptions per call on Anthropic (input, output incl. thinking). Unmeasured; recalibrate
-# from the Summary's real spend after the first runs.
+# Token assumptions per call on Anthropic (input, output incl. thinking). Research / parse / summary
+# unmeasured; recalibrate from the Summary's real spend.
 A_RESEARCH_TOKENS = (30_000, 3_000)  # search results come back as input tokens
 A_SEARCHES_PER_RESEARCH = 3  # max_uses is 5
-A_FORECAST_TOKENS = (4_000, 6_000)  # effort medium; thinking is billed as output
+# v0.4.4 calibration (measured 2026-11-12 from Actions logs 11-01..11-08, 17 MiniBench questions,
+# local ledger $1.61): minimum (x1) $0.081/question (n=14), lean (x2) $0.147 (n=3) vs old estimates
+# $0.17 / $0.31. Output lowered 6_000 -> 3_500 so minimum ~$0.12 (1.5x measured), lean ~$0.21 (1.4x).
+# Fitted to dollars per question; the input/output token split itself is not measured.
+A_FORECAST_TOKENS = (4_000, 3_500)  # effort medium; thinking is billed as output
 A_PARSE_TOKENS = (2_500, 800)
 A_SUMMARY_TOKENS = (3_000, 800)
 
@@ -760,7 +771,7 @@ def openai_plan(questions: list[tuple[str, datetime | None]], free: dict[str, tu
     def tiers_for(t: Tier) -> dict[str, Tier]:
         if solo:
             return {k: t for k in sel}
-        return {"main": t, "minibench": TIERS[-1] if after_split else t}
+        return {"main": t, "minibench": TIERS[-1] if after_split and minibench_minimum_after_split(env) else t}
 
     def need(tiers: dict[str, Tier], extra: int) -> int:
         per = [big_tokens_per_question(tiers[k]) for k, _ in questions]

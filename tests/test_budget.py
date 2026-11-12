@@ -104,6 +104,31 @@ def test_split_after_first_minibench_round():  # C6
     assert abs(later.kinds["main"].per_question_budget - later.kinds["minibench"].per_question_budget) < 1e-9
 
 
+def test_minibench_minimum_after_split_switch():  # v0.4.4: C6 switch, default "1" = as before
+    day = date(2026, 11, 2)
+    for env in ({}, {"MINIBENCH_MINIMUM_AFTER_SPLIT": "1"}):
+        assert budget.pace(1000.0, day, env, {}, PRICES).kinds["minibench"].tier == budget.TIERS[-1]
+    off = {"MINIBENCH_MINIMUM_AFTER_SPLIT": "0"}
+    rich = budget.pace(1000.0, day, off, {}, PRICES)
+    assert rich.kinds["minibench"].tier == budget.TIERS[0]  # tier from its own share
+    on = budget.pace(1000.0, day, {}, {}, PRICES)
+    assert rich.kinds["main"].per_question_budget == on.kinds["main"].per_question_budget  # share unchanged
+    assert rich.kinds["minibench"].per_question_budget == on.kinds["minibench"].per_question_budget
+    poor = budget.pace(5.0, day, off, {}, PRICES)  # share too small for any richer tier: still minimum
+    assert poor.kinds["minibench"].tier == budget.TIERS[-1]
+
+
+def test_openai_plan_minibench_minimum_after_split_switch():  # v0.4.4: same switch on the OpenAI path
+    from datetime import datetime, timezone
+    now = datetime(2026, 11, 2, 1, 0, tzinfo=timezone.utc)
+    qs = [("main", None), ("minibench", None)]
+    free = {"big": (0, 250_000)}
+    assert budget.openai_plan(qs, free, now, {}).tiers["minibench"] == budget.TIERS[-1]
+    assert budget.openai_plan(qs, free, now, {"MINIBENCH_MINIMUM_AFTER_SPLIT": "1"}).tiers["minibench"] == budget.TIERS[-1]
+    off = budget.openai_plan(qs, free, now, {"MINIBENCH_MINIMUM_AFTER_SPLIT": "0"})
+    assert off.tiers["minibench"] == off.tiers["main"] != budget.TIERS[-1]
+
+
 def test_default_final_model_is_gpt_61_sol_then_terra_then_54():  # v0.1.5
     assert budget.FORECAST_CANDIDATES == ["openai/gpt-6.1-sol", "openai/gpt-5.6-terra", "openai/gpt-5.4"]
     listed = [{"id": m} for m in ("openai/gpt-5.4", "openai/gpt-5.6-terra", "openai/gpt-6.1-sol")]

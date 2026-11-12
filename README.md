@@ -1,6 +1,6 @@
 # forecast-bot
 
-v0.4.3. A low-cost, fully automated Metaculus bot for the Fall 2026 FutureEval tournament and MiniBench.
+v0.4.4. A low-cost, fully automated Metaculus bot for the Fall 2026 FutureEval tournament and MiniBench.
 Based on [Metaculus/metac-bot-template](https://github.com/Metaculus/metac-bot-template) at
 `096cb207d643da3090c4830cd828255bf18da2d5` (2026-10-15), forecasting-tools 0.3.4 (locked; `>=0.3.0,<0.4.0`),
 Python 3.12 on GitHub Actions. Spec: `docs/SPEC.md`. No human edits any individual forecast.
@@ -53,7 +53,10 @@ failures do not trigger it. The first question on the per-tournament provider ru
 costs one failing request per run; the next run tries it again. Summary and precheck show a yellow
 "<tournament> 這輪改用 <provider>" box with the reason and per-provider submitted counts. Every published
 MiniBench question appends `{"id","provider","model","date"}` to `.state/provider_log.jsonl` (kept by the
-state cache). If the global provider is unusable too, the job behaves as v0.4.0. Adding `ANTHROPIC_API_KEY` without `LLM_PROVIDER` moves everything to Anthropic (key
+state cache). If the global provider is unusable too, the job behaves as v0.4.0.
+v0.4.4: both tournaments on the same provider that is not the global one (e.g. both `anthropic`, global
+`openai`) run as one group on one shared budget (main/MiniBench split as on a single provider), with the
+same fallback to the global provider for every unsent question. Adding `ANTHROPIC_API_KEY` without `LLM_PROVIDER` moves everything to Anthropic (key
 order), so set `LLM_PROVIDER=openai` first.
 - The Anthropic path uses the official `anthropic` Python SDK (not litellm). Final forecasts:
   `claude-opus-5-5`, effort `ANTHROPIC_EFFORT` (default `medium`), server-side refusal fallback
@@ -113,6 +116,7 @@ Secrets: `METACULUS_TOKEN`, and one of `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`
 | `BUDGET_RESERVE` | balance excluded from pacing | `BUDGET_STOP_BELOW` |
 | `BUDGET_SPLIT_DATE` | from this date the main tournament gets most of the budget | 2026-11-01 |
 | `MAIN_BUDGET_SHARE` | main tournament share after the split date | 0.8 |
+| `MINIBENCH_MINIMUM_AFTER_SPLIT` | `0` lets MiniBench pick its tier from its own share after the split date (Anthropic and OpenAI paths); otherwise it is forced to the minimum tier (C6) | `1` |
 | `MAIN_QUESTIONS_PER_DAY` / `MINIBENCH_QUESTIONS_PER_DAY` | new-question estimate for pacing | 4 |
 | `SEASON_END` | pacing horizon | 2027-01-01 |
 | `BINARY_MIN` / `BINARY_MAX` | binary probability bounds | 0.03 / 0.97 |

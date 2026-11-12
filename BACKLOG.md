@@ -2,6 +2,17 @@
 
 ## 收工日誌
 
+### 2026-11-12 v0.4.4 共用 provider 路徑掛備援＋MiniBench minimum 開關＋Anthropic 估價校準
+- 起因：run 43229870890（MAIN＝MINIBENCH＝anthropic、全域 openai）走單一路徑＝無 v0.4.1 備援＋C6 MiniBench minimum。
+- 選法：單一路徑掛 fallback（不改 split 共用預算）。兩賽事同 provider 且≠`select_provider` 時 `main.make_shared_group` 包成一個 Group（無 `_PACE_KINDS`＝一次 pace、一本帳、80/20 照舊）丟 `run_split`；fallback＝同函式建全域 provider 群組（兩賽事、同 11-01 前配速）。runner／run_split 零邏輯改動，既有 215 測試除版號斷言外沒改。同 provider 且＝全域＝原路徑不變。
+- precheck 單一路徑同補：該 provider problem 且≠全域 -> 再算全域 part，「全部賽事（anthropic，用不了）／（openai，備援）」＋黃框；不補的話 precheck 紅＝main.py 不跑、備援永遠到不了。
+- Summary：單一共用群組首行改「全部賽事同一個 provider（共用一份預算）」，split 照舊「各賽事分開跑」。provider_log 在此路徑也會寫（publish＋tournament）。
+- 開關 `MINIBENCH_MINIMUM_AFTER_SPLIT`（預設 1＝C6）：`pace` 與 `openai_plan` 同吃；0＝MiniBench 照自己那份挑 tier，分錢不變。yaml×2、README 表＋provider 段。
+- 校準（Actions log 11-01～11-08，anthropic MiniBench 17 題、本機帳合計 $1.61）：minimum x1 實測 $0.081／題（n=14，估 $0.17）、lean x2 $0.147（n=3，估 $0.31），>2 倍 -> `A_FORECAST_TOKENS` (4000,6000)->(4000,3500)：minimum 估 $0.12、lean $0.21、standard $0.30、full $0.47。研究段常數沒動；input/output 拆分沒測，只對總額。註：當時 MiniBench 實際多是 minimum（7 輪中 6 輪 x1、1 輪 x2），不是 standard。
+- 試算（$80、重置日 1、11-12、開關 0）：minibench 每題 $0.198 < lean $0.21 -> 仍 minimum；要 MiniBench 升級得同時調低 MAIN_BUDGET_SHARE。
+- 版號 0.4.4（pyproject／main／precheck／README／test_workflows_and_repo）。測試 225 passed（舊 215 只改版號斷言，新 10：test_split_provider 8、test_budget 2）。
+- 沒驗：真 API 的共用路徑 run 與真備援觸發；cli 測試以假 run_split 只驗接線；Anthropic 本機帳 vs Console 的對帳（Console 11 月 $1.56 只是旁證）。
+
 ### 2026-11-12 v0.4.3 研究摘要印進 log
 - 動機：事後稽核研究段「資料新不新、對不對題」，但研究摘要只貼成 Metaculus 私人留言，Actions log 沒有。
 - 改動：`ForecastBot2026.run_research` 兩條路匯合處呼叫 `_log_research`：印 `::group::RESEARCH <page_url> provider=<anthropic|openai|litellm> model=<id>`＋研究全文（含 Sources）＋`::endgroup::`；超過 `RESEARCH_LOG_MAX_CHARS`（6000）截斷並註明截了幾字元。provider 由 researcher 類別名判斷，不改簽名。

@@ -73,6 +73,7 @@ jobs:
           MC_MIN_PROB: ${{ vars.MC_MIN_PROB }}
           LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
           LOG_RESEARCH: ${{ vars.LOG_RESEARCH }}
+          MINIBENCH_MINIMUM_AFTER_SPLIT: ${{ vars.MINIBENCH_MINIMUM_AFTER_SPLIT }}
           MAIN_LLM_PROVIDER: ${{ vars.MAIN_LLM_PROVIDER }}
           MAIN_LLM_PROVIDER_FROM: ${{ vars.MAIN_LLM_PROVIDER_FROM }}
           MINIBENCH_LLM_PROVIDER: ${{ vars.MINIBENCH_LLM_PROVIDER }}

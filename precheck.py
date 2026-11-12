@@ -29,7 +29,7 @@ from typing import Any, Callable
 import budget
 import state as state_mod
 
-VERSION = "0.4.3"
+VERSION = "0.4.4"
 SWITCHES = ("BOT_ENABLED", "PUBLISH", "DRY_RUN_LLM")
 # Must equal forecasting_tools.MetaculusClient.CURRENT_AI_COMPETITION_ID /
 # CURRENT_MINIBENCH_ID (asserted in tests).
@@ -465,9 +465,22 @@ def run(env: dict[str, str], deps: Deps | None = None) -> tuple[int, bool, str]:
     if len({p for p, _ in plan.values()}) == 1:  # one provider for both (unset vars: as before)
         provider = plan["main"][0]
         part = _provider_part(budget.provider_env(env, provider), provider, store, deps, items, new, publish, dry_llm)
+        old = None
+        base = budget.select_provider(env)
+        if part.problem and provider != base:  # v0.4.4: the run hands every tournament to `base` (v0.4.1 fallback)
+            old = part
+            part = _provider_part(budget.provider_env(env, base), base, store, deps, items, new, publish, dry_llm)
+            lines += old.warn
         lines += part.warn
         lines.append(open_line)
-        lines += part.info + budget.provider_schedule_notes(env, deps.now().date())
+        if old is not None:
+            lines.append(f"- 全部賽事（{old.provider}，用不了）：")
+            lines += ["  " + x for x in old.info]
+            lines.append(f"- 全部賽事（{part.provider}，備援）：")
+            lines += ["  " + x for x in part.info] + budget.provider_schedule_notes(env, deps.now().date())
+            lines += _block("WARNING", f"**全部賽事這輪改用 {part.provider}**（原因：{old.problem}）")
+        else:
+            lines += part.info + budget.provider_schedule_notes(env, deps.now().date())
         systemic += [part.problem] if part.problem else []
         needs_llm = part.needs_llm
     else:  # v0.4.0: each tournament on its own provider; one provider's trouble only stops its tournament

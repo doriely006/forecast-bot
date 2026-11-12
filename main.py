@@ -50,7 +50,7 @@ import guards  # noqa: E402
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
-VERSION = "0.4.3"
+VERSION = "0.4.4"
 RESEARCH_LOG_MAX_CHARS = 6000
 
 # Model choice (explicit candidate lists, per-tournament config) lives in
@@ -1101,6 +1101,26 @@ def make_group(kind: str, provider: str, env: dict[str, str], tournaments: list[
     )
 
 
+def make_shared_group(provider: str, env: dict[str, str], tournaments: list[tuple[str, Any]], ledger: Any,
+                      client: Any) -> Any:
+    """v0.4.4: every tournament on one provider as a single group: one run, one pacing over one budget
+    (no per-tournament copy of the same money), so run_split can hang the v0.4.1 fallback on it."""
+    import budget
+    import runner
+
+    kinds = list(dict.fromkeys(budget.kind_of(name) for name, _ in tournaments))
+    penv = budget.provider_env(env, provider)
+    forecast_ids, cheap_id, prices, llms_for, key_lookup_fn, probe_fn = provider_setup(provider, penv, ledger)
+    return runner.Group(
+        kind="、".join(kinds), provider=provider, env=penv, tournaments=list(tournaments),
+        key_lookup_fn=key_lookup_fn,
+        bot_factory=lambda k, tier: make_bot(forecast_ids[k], cheap_id, tier.forecasts, client, llms_for(k)),
+        models={k: (forecast_ids[k], cheap_id) for k in budget.KINDS},
+        prices={k: (prices[forecast_ids[k]], prices[cheap_id]) for k in budget.KINDS},
+        probe_fn=probe_fn,
+    )
+
+
 def cli(argv: list[str] | None = None) -> int:
     import budget
     import precheck
@@ -1143,7 +1163,14 @@ def cli(argv: list[str] | None = None) -> int:
         kinds = list(dict.fromkeys(budget.kind_of(name) for name, _ in tournaments))
         plan = budget.tournament_providers(env, budget.utc_today(), kinds)  # v0.4.0
         notes = [note for _, note in plan.values() if note]
-        if len({p for p, _ in plan.values()}) == 1:  # one provider for everything (unset vars: as before)
+        base = budget.select_provider(env)
+        shared = {p for p, _ in plan.values()}
+        if len(shared) == 1 and base not in shared:  # v0.4.4: all on one non-global provider: keep the fallback
+            group = make_shared_group(plan[kinds[0]][0], env, tournaments, ledger, client)
+            group.fallback = lambda: make_shared_group(base, env, tournaments, ledger, client)
+            result = asyncio.run(runner.run_split(mode=args.mode, publish=publish, groups=[group], client=client,
+                                                  version=VERSION, store=store, notes=notes))
+        elif len(shared) == 1:  # one provider for everything (unset vars: as before)
             provider = plan[kinds[0]][0]
             penv = budget.provider_env(env, provider)
             forecast_ids, cheap_id, prices, llms_for, key_lookup_fn, probe_fn = provider_setup(provider, penv, ledger)
@@ -1168,7 +1195,6 @@ def cli(argv: list[str] | None = None) -> int:
             result.notes = notes
         else:  # v0.4.0: each tournament on its own provider, budget and stop
             groups = [make_group(kind, plan[kind][0], env, tournaments, ledger, client) for kind in kinds]
-            base = budget.select_provider(env)
             for g in groups:  # v0.4.1: provider unusable -> this run's unsent questions go to the global provider
                 if g.provider != base:
                     g.fallback = (lambda k=g.kind: make_group(k, base, env, tournaments, ledger, client, solo=False))

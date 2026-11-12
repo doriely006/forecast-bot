@@ -437,3 +437,116 @@ def test_before_from_date_and_unset_vars_are_exactly_v040(tmp_path):
                            prices={k: O_PRICE for k in budget.KINDS}, env=dict(SPLIT), tournaments=TOURNAMENTS,
                            concurrency=1, store=store, today=DAY, now=NOW, provider="openai"))
     assert not log_rows(tmp_path)
+
+
+# ------------------------------------------------------------ v0.4.4 every tournament on one non-global provider
+
+SHARED = {**KEYS, "LLM_PROVIDER": "openai", "ANTHROPIC_BUDGET_USD": "15",
+          "MAIN_LLM_PROVIDER": "anthropic", "MINIBENCH_LLM_PROVIDER": "anthropic"}
+
+
+def shared_group(store, bot, fb_bot, made=None, env=SHARED):
+    def group(provider, b):
+        genv = budget.provider_env(env, provider)  # no _PACE_KINDS: one pacing over both tournaments
+        look = (lambda: budget.anthropic_lookup_from_store(genv, store, DAY)) if provider == "anthropic" \
+            else (lambda: budget.openai_lookup_from_store(genv, store, DAY))
+        models, prices = (A_MODELS, A_PRICE) if provider == "anthropic" else (O_MODELS, O_PRICE)
+        return runner.Group("main、minibench", provider, genv, list(TOURNAMENTS), look, lambda k, t: b,
+                            {k: models for k in budget.KINDS}, {k: prices for k in budget.KINDS})
+
+    g = group("anthropic", bot)
+
+    def fallback():
+        if made is not None:
+            made.append(1)
+        return group("openai", fb_bot)
+
+    g.fallback = fallback
+    return [g]
+
+
+def test_shared_provider_budget_stop_falls_back_to_global_same_run(tmp_path):
+    store = state.PendingComments.load(tmp_path)
+    store.add_spend("2026-10-13", 13.0)  # Anthropic below its stop line before any call
+    a, fb = Bot(), Bot()
+    s, client = run_fb(store, shared_group(store, a, fb))
+    assert not a.seen and sorted(fb.seen) == [101, 103, 104, 201, 202, 203, 204]
+    assert [r.provider for r in s.groups] == ["anthropic", "openai"] and s.groups[1].fallback_of == "anthropic"
+    assert s.groups[0].moved == 7 and s.exit_code == 0 and not s.systemic
+    text = runner.render_split_summary(s)
+    assert "- 全部賽事同一個 provider（共用一份預算）：main、minibench anthropic" in text
+    assert "這輪改用 openai" in text and "（備援）" in text and "> [!CAUTION]" not in text
+
+
+def test_shared_provider_402_mid_run_moves_the_rest(tmp_path):
+    store = state.PendingComments.load(tmp_path)
+    credit = main.AnthropicCreditError("Anthropic credit/spend limit reached (HTTP 400): spend limit")
+    a, fb = SeqBot(1, credit), Bot()
+    s, _ = run_fb(store, shared_group(store, a, fb))
+    assert len(a.seen) == 2 and len(fb.seen) == 6 and a.seen[0] not in fb.seen
+    assert s.groups[0].count("submitted") == 1 and s.groups[0].fell_back.startswith("Anthropic HTTP 402")
+    assert s.exit_code == 0 and store.failures == {}
+
+
+def test_shared_provider_ordinary_run_does_not_build_fallback(tmp_path):
+    store = state.PendingComments.load(tmp_path)
+    made = []
+    s, _ = run_fb(store, shared_group(store, Bot(), Bot(), made))
+    assert not made and len(s.groups) == 1 and s.groups[0].count("submitted") == 7
+
+
+def test_shared_provider_budget_is_split_once_not_per_tournament(tmp_path):
+    store = state.PendingComments.load(tmp_path)
+    s, _ = run_fb(store, shared_group(store, Bot(), Bot()))
+    r = s.groups[0]
+    assert set(r.pacing.kinds) == set(budget.KINDS) and r.budget_total == pytest.approx(15)
+    reset = budget.credit_period(DAY, budget.credit_reset_day(SHARED))[1]
+    spendable = 15.0 - 3.0  # BUDGET_RESERVE = BUDGET_STOP_BELOW = $3
+    used = sum(k.per_question_budget * k.remaining_questions for k in r.pacing.kinds.values())
+    assert used == pytest.approx(spendable)  # main 80% + MiniBench 20% of one budget, not 100% each
+    solo = budget.pace(15.0, DAY, budget.provider_env(SHARED, "anthropic", ["minibench"]), {"minibench": 4},
+                       {"minibench": A_PRICE}, reset, "anthropic")
+    assert r.pacing.kinds["minibench"].per_question_budget < solo.kinds["minibench"].per_question_budget
+
+
+def test_make_shared_group_wires_both_tournaments_to_one_provider(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "a-not-real")
+    monkeypatch.setenv("OPENAI_API_KEY", "o-not-real")
+    store = state.PendingComments.load(tmp_path)
+    tours = [("FutureEval Fall 2026", 33121), ("MiniBench", "minibench")]
+    g = main.make_shared_group("anthropic", SHARED, tours, lambda: store, client=None)
+    assert g.tournaments == tours and g.models == {k: A_MODELS for k in budget.KINDS}
+    assert g.env["LLM_PROVIDER"] == "anthropic" and budget.pace_kinds(g.env) == budget.KINDS
+    assert g.key_lookup_fn().provider == "anthropic" and g.key_lookup_fn().info.limit == 15.0
+
+
+def test_cli_hangs_the_fallback_on_the_shared_provider(tmp_path, monkeypatch):
+    for k, v in {**SHARED, "METACULUS_TOKEN": "t", "STATE_DIR": str(tmp_path),
+                 "GITHUB_STEP_SUMMARY": str(tmp_path / "s.md")}.items():
+        monkeypatch.setenv(k, v)
+    seen = {}
+
+    async def fake_split(**kw):
+        seen.update(kw)
+        return runner.SplitResult(main.VERSION, kw["mode"], kw["publish"])
+
+    monkeypatch.setattr(runner, "run_split", fake_split)
+    assert main.cli(["--mode", "tournament"]) == 0
+    (g,) = seen["groups"]
+    assert g.provider == "anthropic" and set(g.models) == set(budget.KINDS) and len(g.tournaments) == 2
+    fb = g.fallback()
+    assert fb.provider == "openai" and fb.fallback is None and budget.pace_kinds(fb.env) == budget.KINDS
+
+
+def test_precheck_shared_provider_out_of_budget_falls_back_to_global(tmp_path):
+    state.PendingComments.load(tmp_path).add_spend("2026-10-13", 13.0)
+    code, work, text = _precheck(tmp_path, SHARED)
+    assert code == 0 and work is True and "**全部賽事這輪改用 openai**（原因：Anthropic：remaining $2.00" in text
+    assert "- 全部賽事（anthropic，用不了）：" in text and "- 全部賽事（openai，備援）：" in text
+    assert "> [!CAUTION]" not in text
+
+
+def test_precheck_shared_provider_healthy_is_single_listing(tmp_path):
+    code, work, text = _precheck(tmp_path, SHARED)
+    assert code == 0 and work is True and text.count("- Provider：") == 1 and "- Provider：anthropic" in text
+    assert "備援" not in text

@@ -916,7 +916,10 @@ def render_split_summary(s: SplitResult, with_header: bool = True) -> str:
     lines: list[str] = [precheck.summary_header(s.publish), ""] if with_header else []
     lines += [f"## forecast-bot v{s.version}：預測", ""]
     lines.append(f"- 模式：`{s.mode}`" + ("" if s.publish else "（DRY RUN，什麼都不送）"))
-    lines.append("- 各賽事分開跑：" + "；".join(f"{'、'.join(r.models)} {r.provider}" for r in s.groups if not r.fallback_of))
+    primary = [r for r in s.groups if not r.fallback_of]
+    shared = len(primary) == 1 and len(primary[0].models) > 1  # v0.4.4: one group holding every tournament
+    lead = "- 全部賽事同一個 provider（共用一份預算）：" if shared else "- 各賽事分開跑："
+    lines.append(lead + "；".join(f"{'、'.join(r.models)} {r.provider}" for r in primary))
     for r in s.groups:
         if r.fell_back:  # v0.4.1
             kinds = "、".join(r.models)
