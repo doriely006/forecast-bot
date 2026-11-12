@@ -222,3 +222,13 @@ def test_research_log_failure_does_not_break(monkeypatch):
     monkeypatch.setattr("builtins.print", boom)
     out = _run_research(_research_bot("found X"), monkeypatch)
     assert "found X" in out
+
+
+def test_research_log_neutralizes_workflow_commands(monkeypatch, capsys):
+    monkeypatch.delenv("LOG_RESEARCH", raising=False)
+    out = _run_research(_research_bot("hi\n::add-mask::abc\n  ::endgroup::\nbye"), monkeypatch)
+    lines = capsys.readouterr().out.splitlines()
+    assert [l for l in lines if l.strip().startswith("::add-mask")] == []
+    assert [l for l in lines if l.strip() == "::endgroup::"] == ["::endgroup::"]
+    assert sum(1 for l in lines if l.lstrip().startswith("::")) == 2  # group + endgroup only
+    assert "::add-mask::abc" in out  # returned research untouched

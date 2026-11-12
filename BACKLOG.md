@@ -6,9 +6,10 @@
 - 動機：事後稽核研究段「資料新不新、對不對題」，但研究摘要只貼成 Metaculus 私人留言，Actions log 沒有。
 - 改動：`ForecastBot2026.run_research` 兩條路匯合處呼叫 `_log_research`：印 `::group::RESEARCH <page_url> provider=<anthropic|openai|litellm> model=<id>`＋研究全文（含 Sources）＋`::endgroup::`；超過 `RESEARCH_LOG_MAX_CHARS`（6000）截斷並註明截了幾字元。provider 由 researcher 類別名判斷，不改簽名。
 - 開關：env `LOG_RESEARCH`，值 "0" 才關（預設開）；兩支 workflow yaml 加一行、README 變數表加一列。只印 URL／provider／model／研究文字，不碰 key／header。
+- 研究文字行首（允許前導空白）的 `::` 改印成 `: :`，避免 Actions 把網頁內容當 workflow command 執行（已處理）。
 - 印 log 全包 try/except 吞掉，不影響該題預測；回傳的研究文字不截斷。
 - 版號 0.4.3（pyproject／main／precheck／README／test_workflows_and_repo）。測試 214 passed（舊 210，新 4，加在 tests/test_workflows_and_repo.py）。
-- 沒驗：真 Actions run 的 `::group::` 摺疊顯示與實際輸出；真 API 的 researcher.model 字串；LLM 輸出裡若夾 `::` 指令字樣的影響（未過濾）。
+- 沒驗：真 Actions run 的 `::group::` 摺疊顯示與實際輸出；真 API 的 researcher.model 字串。
 - 主 session 同日已改 repo variable（非本輪 code 改）：`MAIN_LLM_PROVIDER=anthropic`（正賽改走 Claude，OpenAI 當備援）；`ANTHROPIC_BUDGET_USD` 14->80；`ANTHROPIC_CREDIT_RESET_DAY` 13->1（對齊 Console 月上限 1 號歸零；API credit 每月 12 號補 $100；換期使本機帳從 $0 起算，Console 11 月實際已花 $1.56）。
 - 待辦：Haiku 研究品質複查：v0.4.3 上線後抓 log 的 RESEARCH 段 8～10 題判，再決定研究段換不換 Sonnet（取代舊「11-08 複查 Haiku 研究品質」）。
 

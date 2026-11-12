@@ -647,6 +647,7 @@ class ForecastBot2026(ForecastBot):
             if len(body) > RESEARCH_LOG_MAX_CHARS:
                 body = (body[:RESEARCH_LOG_MAX_CHARS]
                         + f"\n[truncated {len(body) - RESEARCH_LOG_MAX_CHARS} chars]")
+            body = re.sub(r"(?m)^(\s*)::", r"\1: :", body)  # neutralize workflow commands
             print(f"::group::RESEARCH {question.page_url} provider={provider} model={model}")
             print(body)
             print("::endgroup::", flush=True)
