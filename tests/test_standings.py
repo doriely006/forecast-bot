@@ -13,6 +13,8 @@ def fake_get(url, headers=None, timeout=30):
         return {"username": ME}
     if url.endswith("/projects/tournaments/minibench/"):
         return FIX["minibench_project"]
+    if url.endswith("/projects/tournaments/market-pulse-26q4/"):
+        return FIX["minibench_project"]
     if url.endswith("/leaderboards/project/33121/"):
         return FIX["main"]
     if url.endswith("/leaderboards/project/33999/"):
@@ -38,6 +40,8 @@ def test_summary_lines_from_fixture():
     lines = "\n".join(standings.standings_lines({"METACULUS_TOKEN": "t"}, fake_get))
     assert "正賽：第 4/5（全榜第 6）" in lines and "觸發停損" in lines
     assert "MiniBench：第 1/2（全榜第 2），獎金欄 $120" in lines
+    assert "Market Pulse 26Q4：第 1/2（全榜第 2），獎金欄 $120" in lines  # v0.4.8: third board, no stop-loss line
+    assert lines.count("停損：") == 1
 
 
 def test_unreadable_leaderboard_is_reported_not_raised():
@@ -47,7 +51,7 @@ def test_unreadable_leaderboard_is_reported_not_raised():
         raise ValueError("bad payload")
 
     lines = "\n".join(standings.standings_lines({"BOT_USERNAME": ME}, broken))
-    assert lines.count("讀不到排行榜") == 2
+    assert lines.count("讀不到排行榜") == 3
 
 
 def test_runs_once_a_day_or_manually(tmp_path):
@@ -82,7 +86,7 @@ def test_bad_payload_dumps_shape_without_values():
         return {"results": [secret, secret], "meta": {"x": secret}}  # strings, not dicts -> AttributeError
 
     lines = "\n".join(standings.standings_lines({"METACULUS_TOKEN": "t"}, odd))
-    assert lines.count("讀不到排行榜（EntryShapeError: AttributeError") == 2
+    assert lines.count("讀不到排行榜（EntryShapeError: AttributeError") == 3
     assert "first entry type=str" in lines
     assert secret not in lines and "email" not in lines
     assert all(len(x) <= 400 for x in lines.splitlines())

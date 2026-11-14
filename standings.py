@@ -178,7 +178,8 @@ def standings_lines(
         return lines + [f"- 讀不到 bot 帳號名稱（{e.__class__.__name__}）；可設 repo variable BOT_USERNAME"]
     lines.append(f"- bot 帳號：{me}")
     boards = [("正賽", env.get("STANDINGS_MAIN_PROJECT") or "33121", True),
-              ("MiniBench", env.get("STANDINGS_MINIBENCH_PROJECT") or "minibench", False)]
+              ("MiniBench", env.get("STANDINGS_MINIBENCH_PROJECT") or "minibench", False),
+              ("Market Pulse 26Q4", env.get("STANDINGS_MARKETPULSE_PROJECT") or "market-pulse-26q4", False)]
     for label, project, is_main in boards:
         seen.clear()
         try:

@@ -2,6 +2,15 @@
 
 ## 收工日誌
 
+### 2026-11-15 v0.4.8 standings 接 Market Pulse 榜＋Haiku 研究品質複查
+- standings.py 的 boards 加第三列「Market Pulse 26Q4」（slug `market-pulse-26q4`，可用 `STANDINGS_MARKETPULSE_PROJECT` 覆蓋）；is_main=False，所以不進停損判斷（停損只看正賽）。test_standings 加斷言＋「讀不到」計數 2->3。版號 0.4.8（pyproject／main／precheck／README／test_workflows_and_repo）。
+- 測試：`.venv/bin/python -m pytest -q`＝新舊共 1 FAIL：`test_split_provider::test_fallback_is_charged_to_the_openai_ledger`，stash 掉本輪改動一樣紅＝既有的（測試寫死 2026-10-13 的花費，今天 11-15 已落出 Anthropic 重置日 1 號起的週期，period_spent 讀到 0.0）；沒修、不屬本輪。未跑真 API dry-run（standings 的新 board 只有 fixture 驗）。
+- Haiku 複查：樣本 8 筆 RESEARCH（run 43231898167 五筆＝post 46016 三個 subquestion、46006、45995；43338114689 的 46468；43512391044 的 46472；43611649340 的 46496），每筆 26–55 個 URL。
+  - 好：全部有「Bottom line／status vs 解析條件」段、附來源 URL、有 base rate（財報 guide vs actual、2021 大選、短池 WR 歷年數）、會標「secondary source／stale／inference」、不越權給機率。我讀得出的事實錯：0；內部矛盾：0（Q3 guide 74.0%、Q2 actual 75.0%、8 月修正 133k->186k 等算得通）。事實本身我沒法逐條對外部查證 [K]。
+  - 壞：①引用錯位（46472：2018 杭州 9 面破紀錄掛在 Abu Dhabi 獎金文章；2014 掛在 2024 預覽報告）②複製殘句（「Q1 guidance 74.9% and 75.0%, respectively」、「Q4 could fall to 71%–72%」主詞掉了）③46006 對 bot 說「Your question lists…」④部分 bullet 無 URL（Vera Rubin 20%）⑤3 筆（46016 三題）幾乎同一篇，重複付費。
+  - 判決：維持 Haiku。研究段只當資料蒐集，最終機率由 Opus 產；上列瑕疵是引用精準度，不是會改變機率的事實錯。估計成本差（用 budget.py 常數 A_RESEARCH_TOKENS 30k in／3k out）：Haiku $0.10／$0.50 每 Mtok ≈ $0.0045／題，Sonnet $2／$10 ≈ $0.09／題，差約 +$0.085／題（實測 Market Pulse full 約 $0.22／題，等於 +38%）。重評條件：正賽結算滿 40 題後若名次落後 50%，先換研究段 Sonnet 試 2 週再判。
+  - 沒改任何 model 設定。
+
 ### 2026-11-12 v0.4.7 precheck 認得 group subquestion 的已預測＋最後預測時間診斷
 - 症狀：run 43245626904 precheck「已預測 0；還沒預測 5」，runner 同輪「這輪新交：0」（SDK 認得 13:57Z 已送的 46249/46248/46250/46279/46199）。
 - 根因：precheck `fetch_open_items` 打 `/posts/` 沒帶 `with_cp=true`／`include_conditional_cps=true`；SDK `metaculus_client.py:_create_url_params_for_search`（849-850）有帶。判法本身兩邊同為 `my_forecasts.history` 非空。修：precheck 參數補成跟 SDK 一樣。
@@ -27,7 +36,7 @@
 - 中途事故：先設 MAIN_LLM_PROVIDER 時（v0.4.3）單一路徑無備援＋C6 把 MiniBench 壓成 minimum（run 43229870890 precheck，0 開放題、沒交題），當場刪變數止血，v0.4.4 修完才重開。
 - Haiku 研究初看（只讀了 46016 一題）：對題、有日期、引 SEC／NVIDIA 原始稿、有 base rate。正式複查仍待累積 8～10 題。
 - ~~🟡 precheck 把 Market Pulse 已截止／未開的 subquestion 也算開放（列 69、實際可答 5）-> 每 20 分鐘都判有工作、job 空轉（不花 LLM）。修法：precheck 展開 group 時照 subquestion 自己的 open／close 時間過濾。~~ v0.4.6 已做。
-- 🟡 Market Pulse 榜沒接進 standings.py。
+- ~~🟡 Market Pulse 榜沒接進 standings.py。~~ v0.4.8 已做。
 - 沒驗：備援真觸發；Console 與本機帳對帳（本機 11-01 起從 $0 算，Console 11 月另有 $1.56）。
 
 ### 2026-11-12 v0.4.5 加 Market Pulse 26Q4
@@ -59,7 +68,7 @@
 - 版號 0.4.3（pyproject／main／precheck／README／test_workflows_and_repo）。測試 214 passed（舊 210，新 4，加在 tests/test_workflows_and_repo.py）。
 - 沒驗：真 Actions run 的 `::group::` 摺疊顯示與實際輸出；真 API 的 researcher.model 字串。
 - 主 session 同日已改 repo variable（非本輪 code 改）：`MAIN_LLM_PROVIDER=anthropic`（正賽改走 Claude，OpenAI 當備援）；`ANTHROPIC_BUDGET_USD` 14->80；`ANTHROPIC_CREDIT_RESET_DAY` 13->1（對齊 Console 月上限 1 號歸零；API credit 每月 12 號補 $100；換期使本機帳從 $0 起算，Console 11 月實際已花 $1.56）。
-- 待辦：Haiku 研究品質複查：v0.4.3 上線後抓 log 的 RESEARCH 段 8～10 題判，再決定研究段換不換 Sonnet（取代舊「11-08 複查 Haiku 研究品質」）。
+- ~~待辦：Haiku 研究品質複查~~ 11-15 已做，結論見最上方 v0.4.8 節。
 
 ### 週檢 2026-11-08
 - 「Forecast on tournament questions」11-01 起：success 30／failure 0，每天都有成功 run；最後一輪 11-08 01:50Z（42435950328）。
