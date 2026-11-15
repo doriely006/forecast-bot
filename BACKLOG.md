@@ -2,6 +2,14 @@
 
 ## 收工日誌
 
+### 週檢 2026-11-15
+- 「Forecast on tournament questions」11-08 起：success 32／failure 0，每天都有成功 run；最後一輪 11-14 23:50Z（43655205056，v0.4.8）。
+- 本週新交 19（排除上週已計的 42435950328；含 43231898167 Market Pulse 5 題）；失敗 0；預算不足跳過 0；臨截止跳過 2；截止前重答 0（還沒有題進 12h 視窗）。
+- 43655205056：共用路徑 anthropic（main／minibench Opus x5）；Anthropic 本期（11-01 起，本機記帳）$1.74／$80、剩 $78.26、配速 full（$0.57／題）、見底 2026-12-04（晚於 12-01 重置）。開放題 6（正賽 1、MiniBench 0、Market Pulse 5）＝全部已預測，新交 0 正確。
+- OpenAI 11-12 切換後不再跑；11 月本機記帳停在 $0.56／$4.50。log 無「改用 openai」＝備援沒觸發。
+- 無停損（已結算 4 題，未滿 40 不判）、無 fatal／Traceback。
+- 判斷：沒事，不推播。OpenAI 帳單 10-26 已校準，不要截圖。旁註：Anthropic 本機帳 $1.74 看起來偏低（11-12 單輪就記 $1.09、之後還交了 8 題 full），重置日 13->1 換期的帳要不要對 Console，留給下次 code session 判，週檢不動。
+
 ### 2026-11-15 v0.4.8 standings 接 Market Pulse 榜＋Haiku 研究品質複查
 - standings.py 的 boards 加第三列「Market Pulse 26Q4」（slug `market-pulse-26q4`，可用 `STANDINGS_MARKETPULSE_PROJECT` 覆蓋）；is_main=False，所以不進停損判斷（停損只看正賽）。test_standings 加斷言＋「讀不到」計數 2->3。版號 0.4.8（pyproject／main／precheck／README／test_workflows_and_repo）。
 - 測試：`.venv/bin/python -m pytest -q`＝新舊共 1 FAIL：`test_split_provider::test_fallback_is_charged_to_the_openai_ledger`，stash 掉本輪改動一樣紅＝既有的（測試寫死 2026-10-13 的花費，今天 11-15 已落出 Anthropic 重置日 1 號起的週期，period_spent 讀到 0.0）；沒修、不屬本輪。未跑真 API dry-run（standings 的新 board 只有 fixture 驗）。
