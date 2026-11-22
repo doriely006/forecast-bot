@@ -6,7 +6,7 @@
 - run 44974671533（一次性查詢，已刪）。榜是 spot_peer_tournament、finalized、獎池 $1,000，bot 兩輪都 prize 0、無獎金。
 - 33132（10-19～11-06）：全榜 137/410，非 metac 153/321，score 99.6，contribution 1（只答到 1 題，rank CI 99–184）。
 - 33135（11-02～11-20）：全榜 156/435，非 metac 174/355，score 85.7，contribution 17，rank CI 107–243。
-- 10-19 輪 bot 只在 10-24、10-26 交過 2 題（舊 log 10-20～22 已過期）；當前輪 33169 未結算，見 standings。
+- 10-19 輪：舊 log（10-23 起；10-20～22 已過期）只見 2 題進 precheck 表（post 46410、46411），與 contribution 1 相符。當前輪 33169 未結算，見 standings。
 
 ### 週檢 2026-11-22
 - 「Forecast on tournament questions」11-15 起：success 25／failure 0／cancelled 1（44972417110，01:38Z v0.4.9 部署期間，迴圈 step 被取消）；每天都有成功 run；檢查時 44973299394（v0.4.9 迴圈）跑中、未完。
