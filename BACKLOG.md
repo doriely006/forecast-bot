@@ -2,6 +2,13 @@
 
 ## 收工日誌
 
+### 週檢 2026-11-22
+- 「Forecast on tournament questions」11-15 起：success 25／failure 0／cancelled 1（44972417110，01:38Z v0.4.9 部署期間，迴圈 step 被取消）；每天都有成功 run；檢查時 44973299394（v0.4.9 迴圈）跑中、未完。
+- 本週新交 35（9 輪有交題：10＋9＋5＋5＋3＋1×3＋0）；失敗 0；預算不足跳過 0；臨截止跳過 3（11-17）；截止前重答 0。
+- 44972140188（最近成功，precheck 判無工作）：開放題 8（正賽 0、MiniBench 0、Market Pulse 8）＝全部已預測，新交 0 正確。Anthropic 本期（本機記帳）$10.86／$80、剩 $69.14、配速 full（$0.95／題）、見底 2026-12-10（晚於 12-01 重置）。
+- 無停損（已結算 5 題，未滿 40 不判）、無 fatal／Traceback、無「改用 openai」。
+- 判斷：沒事，不推播。OpenAI 帳單 10-26 已校準、Anthropic 11-22 已對 Console，不要截圖。下週看 v0.4.9 迴圈＋接力的真跑：每天 run 數應變少但每輪長、MiniBench 題覆蓋率是否上升。
+
 ### 2026-11-22 v0.4.9 job 內迴圈＋接力
 - tournament.yaml：單 job 迴圈 300 分（timeout 350、main.py 單輪上限 325 分處被 timeout 砍）；每輪 precheck（輸出寫每輪暫存 GITHUB_OUTPUT、bash 解析 work=true）→ 有工作才跑 main.py → sleep 到下個 :07/:27/:47 UTC。venv／poetry 改迴圈前裝一次。standings --daily 仍在迴圈外。
 - precheck exit≠0（BOT_ENABLED≠1／系統性）→ 迴圈直接紅燈結束；main.py 連 3 輪失敗也停。dry_run_llm 只跑 1 輪、不接力。
