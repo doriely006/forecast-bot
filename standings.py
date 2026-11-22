@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import os
 import sys
+import time
+import urllib.error
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +30,11 @@ import state as state_mod
 
 API_BASE = "https://www.metaculus.com/api"
 STOP_LOSS_MIN_RESOLVED = 40
+REQUEST_GAP_S = 3.0  # pause between API requests (v0.4.9: three boards in a row drew 429)
+RETRY_429_MAX = 4  # retries per request after a 429
+RETRY_429_BASE_S = 15.0  # no Retry-After: wait 15, 30, 60, 120
+RETRY_WAIT_CAP_S = 120.0  # one wait never longer than this
+TOTAL_WAIT_CAP_S = 480.0  # all waits of one standings run (job timeout is 40 min)
 
 
 @dataclass
@@ -156,9 +163,21 @@ def board_overview(payload: Any, me: str) -> list[str]:
     return out
 
 
+def _retry_after(e: Exception) -> float | None:
+    try:
+        return max(0.0, float(e.headers.get("Retry-After")))  # type: ignore[attr-defined]
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 def standings_lines(
-    env: dict[str, str], get_json: Callable[..., Any] = budget.http_get_json
+    env: dict[str, str],
+    get_json: Callable[..., Any] = budget.http_get_json,
+    sleep: Callable[[float], None] | None = None,
 ) -> list[str]:
+    nap = sleep or time.sleep
+    waited = [0.0]
+    first = [True]
     token = env.get("METACULUS_TOKEN", "")
     base = (env.get("METACULUS_API_BASE_URL") or API_BASE).rstrip("/")
     headers = {"Authorization": f"Token {token}"} if token else {}
@@ -167,7 +186,25 @@ def standings_lines(
 
     def get(url: str) -> Any:
         seen.append(None)
-        data = get_json(url, headers, 30)
+        if not first[0]:
+            nap(REQUEST_GAP_S)
+        first[0] = False
+        attempt = 0
+        while True:
+            try:
+                data = get_json(url, headers, 30)
+                break
+            except urllib.error.HTTPError as e:
+                if e.code != 429 or attempt >= RETRY_429_MAX:
+                    raise
+                ra = _retry_after(e)
+                wait = ra if ra is not None else RETRY_429_BASE_S * (2 ** attempt)
+                wait = min(wait, RETRY_WAIT_CAP_S)
+                if waited[0] + wait > TOTAL_WAIT_CAP_S:
+                    raise
+                waited[0] += wait
+                attempt += 1
+                nap(wait)
         seen[-1] = data
         return data
 

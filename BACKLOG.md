@@ -2,12 +2,18 @@
 
 ## 收工日誌
 
+### 2026-11-22 v0.4.9 standings 429 退避
+- standings.py：每個 API 請求前 sleep 3s（首發除外）；HTTP 429 退避重試最多 4 次，有 Retry-After 照它、否則 15／30／60／120s，單次上限 120s，整輪累計上限 480s，超過就拋出、照舊印「讀不到排行榜」。
+- 非 429 的 HTTPError 不重試。`standings_lines(env, get_json, sleep=None)`：sleep 可注入（預設 time.sleep）。
+- 測試：test_standings 加 3 條（429 後讀到、永遠 429 放棄且在上限內、500 不重試）＋autouse 把 time.sleep 換空函式。
+- 版號 0.4.9（五處）。pytest 除既有紅燈 test_fallback_is_charged_to_the_openai_ledger 外全綠。
+
 ### 2026-11-22 Anthropic 帳對 Console（user 截 Daily token cost 表）
 - Console 11-01～11-21（UTC）合計 $10.02（Opus＋Haiku；11-22 $0）；bot 本機帳到 11-21 21:44Z＝$10.86 → bot 高估約 8%，方向安全，不改 budget.py。
 - 拆段：到 11-14 Console $2.36 vs bot $1.74（重置日 13->1 換期少記 $0.62）；11-15～11-21 Console $7.66 vs bot $9.12（高估 19%，單價表或 token 估偏高）。兩段互抵。
 - 注意：截圖是全 org 表、沒 group by API key，若含 claude -p，bot 實花只會更低，結論不變。
 - 用量：月上限 $100、本期實花 ~$10；題數是瓶頸不是預算（開放題 9）。
-- 新洞：standings.py 連打三個 board，MiniBench／Market Pulse 每輪 429（近 30 輪無一次讀到 Market Pulse 榜）；修法＝board 間 sleep＋429 退避重試，待 user 說修。
+- 已修（v0.4.9）：standings.py 連打三個 board 的 429 問題；board 間 sleep＋429 退避重試，見 2026-11-22 v0.4.9 條。
 - 名次快照：正賽 11-21 非 metac 第 378/501（全榜 357，score -51.1），結算 5 題；11-19 前 288/397。
 - 加碼評估（Fable 11-22，唯讀）：三賽事都只計截止當下那筆（spot），提高更新頻率無效，已死。真洞＝覆蓋率：cron 寫 72 次/天、實觸發 2–5 次/天（11-14～21 已驗），正賽／MiniBench 每題只開 3h → 估只答到三到四成題（MiniBench 46569–46615 連號 47 只見 20）。建議 A＝tournament.yaml 單 job 內每 20 分迴圈約 5h（timeout 350、cron 當重啟器），注意 .state 只在 job 尾存；之後才考慮 ANTHROPIC_EFFORT high。研究換 Sonnet 實際 +$0.22/題（main.py:304-309 研究／摘要／解析共用 model）。待 user 開工閘門。
 - 小錯：README／docs/RESEARCH.md 的 Market Pulse 獎池 $7,000 是 Q3，26Q4＝$7,500。

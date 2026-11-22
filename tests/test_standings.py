@@ -40,7 +40,7 @@ def test_summary_lines_from_fixture():
     lines = "\n".join(standings.standings_lines({"METACULUS_TOKEN": "t"}, fake_get))
     assert "正賽：第 4/5（全榜第 6）" in lines and "觸發停損" in lines
     assert "MiniBench：第 1/2（全榜第 2），獎金欄 $120" in lines
-    assert "Market Pulse 26Q4：第 1/2（全榜第 2），獎金欄 $120" in lines  # v0.4.8: third board, no stop-loss line
+    assert "Market Pulse 26Q4：第 1/2（全榜第 2），獎金欄 $120" in lines  # v0.4.9: third board, no stop-loss line
     assert lines.count("停損：") == 1
 
 
@@ -140,3 +140,67 @@ def test_board_overview_finds_bot_in_non_primary_board_without_leaking_others():
     assert "榜上還沒有" in lines and "'Main'（primary，bot_exclusion=exclude，1 筆）" in lines
     assert "'Bots'（non-primary，bot_exclusion=include，2 筆）" in lines
     assert f"{ME} 在此 board：rank 7，score 1.5" in lines and secret not in lines
+
+
+# ---- v0.4.9: 429 backoff ----
+import urllib.error
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleep(monkeypatch):
+    monkeypatch.setattr(standings.time, "sleep", lambda s: None)
+
+
+def _err429(retry_after=None):
+    from email.message import Message
+    h = Message()
+    if retry_after is not None:
+        h["Retry-After"] = str(retry_after)
+    return urllib.error.HTTPError("http://x", 429, "Too Many Requests", h, None)
+
+
+def test_429_is_retried_with_retry_after_then_read():
+    calls = {"n": 0}
+    naps = []
+
+    def flaky(url, headers=None, timeout=30):
+        if url.endswith("/leaderboards/project/33999/"):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise _err429(7 if calls["n"] == 1 else None)
+        return fake_get(url, headers, timeout)
+
+    lines = "\n".join(standings.standings_lines({"METACULUS_TOKEN": "t"}, flaky, naps.append))
+    assert "MiniBench：第 1/2" in lines and "讀不到" not in lines
+    assert 7 in naps and standings.RETRY_429_BASE_S * 2 in naps  # Retry-After honoured, then incremental
+    assert naps.count(standings.REQUEST_GAP_S) >= 5  # gap before every request but the first
+
+
+def test_429_forever_gives_up_within_cap_and_prints_unreadable():
+    naps = []
+
+    def always(url, headers=None, timeout=30):
+        if url.endswith("/users/me"):
+            return {"username": ME}
+        raise _err429()
+
+    lines = "\n".join(standings.standings_lines({"METACULUS_TOKEN": "t"}, always, naps.append))
+    assert lines.count("讀不到排行榜（HTTPError") == 3
+    retry_waits = [n for n in naps if n != standings.REQUEST_GAP_S]
+    assert sum(retry_waits) <= standings.TOTAL_WAIT_CAP_S
+    assert max(retry_waits) <= standings.RETRY_WAIT_CAP_S
+
+
+def test_non_429_http_error_is_not_retried():
+    naps = []
+
+    def boom(url, headers=None, timeout=30):
+        if url.endswith("/users/me"):
+            return {"username": ME}
+        raise urllib.error.HTTPError("http://x", 500, "err", None, None)
+
+    lines = "\n".join(standings.standings_lines({"METACULUS_TOKEN": "t"}, boom, naps.append))
+    assert lines.count("讀不到排行榜") == 3
+    assert all(n == standings.REQUEST_GAP_S for n in naps)
