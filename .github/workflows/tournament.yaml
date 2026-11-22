@@ -108,6 +108,9 @@ jobs:
         run: python3 standings.py --daily
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          MAIN_CLAUDE_FROM: ${{ vars.MAIN_CLAUDE_FROM }}
+          MINIBENCH_CLAUDE_FROM: ${{ vars.MINIBENCH_CLAUDE_FROM }}
+          STOP_LOSS_MIN_AVG: ${{ vars.STOP_LOSS_MIN_AVG }}
       # v0.4.9: install once, whatever precheck says (the loop below may need it
       # any round). Cache hit = seconds.
       - name: Set up Python

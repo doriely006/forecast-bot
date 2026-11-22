@@ -2,9 +2,11 @@
 Standings check (spec 12, C7). Standard library only.
 
 Reads the FutureEval main and MiniBench leaderboards and computes this bot's
-rank among bots that are NOT Metaculus' own (`metac-*`). Stop-loss rule:
-once at least 40 main-tournament questions have resolved for this bot, a rank
-in the bottom half of non-metac bots means "stop or switch model".
+rank among bots that are NOT Metaculus' own (`metac-*`). Stop-loss rule
+(v0.4.10): once at least 40 main-tournament questions from the Claude era
+(last forecast >= MAIN_CLAUDE_FROM) have resolved, an average per-question
+peer score below STOP_LOSS_MIN_AVG (default 0) means "stop or switch model".
+The rank is still printed but no longer part of the rule.
 
 UNVERIFIED: written without a token. The endpoints below are the ones the
 Metaculus site uses as far as known; field names are read defensively. The
@@ -30,6 +32,10 @@ import state as state_mod
 
 API_BASE = "https://www.metaculus.com/api"
 STOP_LOSS_MIN_RESOLVED = 40
+STOP_LOSS_MIN_AVG = 0.0  # env STOP_LOSS_MIN_AVG overrides
+MAIN_CLAUDE_FROM = "2026-11-12T13:55:00Z"  # env MAIN_CLAUDE_FROM: main-tournament provider switched to Claude
+MINIBENCH_CLAUDE_FROM = "2026-11-01T00:00:00Z"  # env MINIBENCH_CLAUDE_FROM
+SCORE_PAGES_MAX = 10  # 100 posts per page
 REQUEST_GAP_S = 3.0  # pause between API requests (v0.4.9: three boards in a row drew 429)
 RETRY_429_MAX = 4  # retries per request after a 429
 RETRY_429_BASE_S = 15.0  # no Retry-After: wait 15, 30, 60, 120
@@ -109,14 +115,99 @@ def non_metac_standing(entries: list[Entry], me: str) -> tuple[int, int, Entry] 
     return None
 
 
-def stop_loss_verdict(rank: int, total: int, resolved: int | None) -> str:
-    if resolved is None:
-        return "結算題數讀不到，停損規則先不判斷"
-    if resolved < STOP_LOSS_MIN_RESOLVED:
-        return f"已結算 {resolved} 題，未滿 {STOP_LOSS_MIN_RESOLVED} 題，停損規則先不判斷"
-    if rank > total / 2:
-        return f"**觸發停損**：已結算 {resolved} 題，非 metac bot 裡第 {rank}/{total}，落在後 50%。停掉或換 model。"
-    return f"已結算 {resolved} 題，非 metac bot 裡第 {rank}/{total}，在前 50%：繼續"
+def stop_loss_verdict(claude_n: int, claude_avg: float | None, min_avg: float = STOP_LOSS_MIN_AVG) -> str:
+    """v0.4.10: judged on the Claude-era resolved main questions and their mean peer score, not on rank."""
+    if claude_n < STOP_LOSS_MIN_RESOLVED or claude_avg is None:
+        return f"Claude 時代已結算 {claude_n} 題，未滿 {STOP_LOSS_MIN_RESOLVED}"
+    if claude_avg < min_avg:
+        return (f"**觸發停損**：Claude 時代已結算 {claude_n} 題，每題平均 peer score {claude_avg:+.2f} < {min_avg:g}。"
+                "停掉或換 model。")
+    return f"Claude 時代已結算 {claude_n} 題，每題平均 peer score {claude_avg:+.2f} >= {min_avg:g}：繼續"
+
+
+def _env_float(env: dict[str, str], key: str, default: float) -> float:
+    try:
+        return float(str(env.get(key, "")).strip())
+    except ValueError:
+        return default
+
+
+def _iso(value: Any) -> datetime | None:
+    import precheck  # lazy: precheck imports budget only, but keep standings importable alone
+    return precheck._stamp_time(value)
+
+
+def _fmt_t(t: datetime | None) -> str:
+    return t.strftime("%Y-%m-%d %H:%MZ") if t else "?"
+
+
+@dataclass
+class Scored:
+    post_id: Any
+    qtype: str
+    resolved_at: datetime | None
+    last_forecast: datetime | None
+    score: float | None
+
+
+SCORE_KEYS = ("spot_peer_score", "peer_score")  # first one present wins
+
+
+def spot_peer(score_data: Any) -> float | None:
+    if not isinstance(score_data, dict):
+        return None
+    for k in SCORE_KEYS:
+        if _num(score_data.get(k)) is not None:
+            return _num(score_data.get(k))
+    return None
+
+
+def scored_questions(post: dict[str, Any]) -> tuple[list[Scored], set[str]]:
+    """Resolved questions of one post on which this bot has a forecast with score_data. -> (rows, score_data keys)."""
+    import precheck
+    qs: list[Any] = []
+    if isinstance(post.get("question"), dict):
+        qs.append(post["question"])
+    g = post.get("group_of_questions")
+    if isinstance(g, dict):
+        qs.extend(x for x in g.get("questions") or [] if isinstance(x, dict))
+    rows, keys = [], set()
+    for q in qs:
+        mine = q.get("my_forecasts")
+        if not isinstance(mine, dict) or not mine.get("history"):
+            continue
+        sd = mine.get("score_data")
+        if isinstance(sd, dict):
+            keys.update(str(k) for k in sd)
+        if q.get("resolution") in (None, "") and q.get("status") != "resolved":
+            continue
+        rows.append(Scored(post.get("id") or q.get("id"), str(q.get("type") or "?"),
+                           _iso(q.get("actual_resolve_time") or q.get("scheduled_resolve_time")),
+                           precheck.last_forecast_time(q), spot_peer(sd)))
+    return rows, keys
+
+
+def era_stats(rows: list[Scored], cutoff: datetime) -> tuple[tuple[int, float | None], tuple[int, float | None]]:
+    """((claude n, mean), (old n, mean)); only rows with a score count. No last-forecast time -> old era."""
+    def agg(xs: list[Scored]) -> tuple[int, float | None]:
+        v = [r.score for r in xs if r.score is not None]
+        return len(v), (sum(v) / len(v) if v else None)
+    scored = [r for r in rows if r.score is not None]
+    new = [r for r in scored if r.last_forecast is not None and r.last_forecast >= cutoff]
+    old = [r for r in scored if r not in new]
+    return agg(new), agg(old)
+
+
+def score_lines(label: str, rows: list[Scored], keys: set[str], cutoff: datetime) -> tuple[list[str], int, float | None]:
+    out = [f"- {label} 逐題（已結算且 bot 有預測 {len(rows)} 題；score_data keys: {','.join(sorted(keys)) or '無'}）"]
+    for r in sorted(rows, key=lambda r: r.resolved_at or datetime.min.replace(tzinfo=timezone.utc)):
+        sc = "?" if r.score is None else f"{r.score:+.2f}"
+        out.append(f"  - post {r.post_id}｜{r.qtype}｜結算 {_fmt_t(r.resolved_at)}｜最後預測 {_fmt_t(r.last_forecast)}｜peer {sc}")
+    (cn, ca), (on, oa) = era_stats(rows, cutoff)
+    f = lambda a: "n/a" if a is None else f"{a:+.2f}"
+    out.append(f"  - {label} Claude 時代（最後預測 >= {_fmt_t(cutoff)}）n={cn}，每題平均 peer score {f(ca)}")
+    out.append(f"  - {label} 舊時代 n={on}，每題平均 peer score {f(oa)}")
+    return out, cn, ca
 
 
 def resolve_project(project: str, get: Callable[[str], Any], base: str) -> str:
@@ -170,6 +261,28 @@ def _retry_after(e: Exception) -> float | None:
         return None
 
 
+def fetch_scored(pid: str, my_id: Any, get: Callable[[str], Any], base: str) -> tuple[list[Scored], set[str]]:
+    """Resolved posts of one tournament that this bot forecast on (same params as forecasting_tools
+    MetaculusClient: with_cp, forecaster_id)."""
+    import urllib.parse
+    rows: list[Scored] = []
+    keys: set[str] = set()
+    for page in range(SCORE_PAGES_MAX):
+        params = {"tournaments": pid, "statuses": "resolved", "limit": 100, "offset": page * 100,
+                  "order_by": "-published_time", "with_cp": "true", "include_conditional_cps": "true"}
+        if my_id is not None:
+            params["forecaster_id"] = my_id
+        data = get(f"{base}/posts/?{urllib.parse.urlencode(params)}")
+        results = data.get("results", []) if isinstance(data, dict) else []
+        for post in results:
+            r, k = scored_questions(post)
+            rows.extend(r)
+            keys |= k
+        if not isinstance(data, dict) or not data.get("next") or not results:
+            break
+    return rows, keys
+
+
 def standings_lines(
     env: dict[str, str],
     get_json: Callable[..., Any] = budget.http_get_json,
@@ -209,11 +322,27 @@ def standings_lines(
         return data
 
     lines = ["", "### 排行榜（非 metac-* bot 裡的名次）"]
+    my_id: Any = None
     try:
-        me = env.get("BOT_USERNAME") or get(f"{base}/users/me")["username"]
+        if env.get("BOT_USERNAME"):
+            me = env["BOT_USERNAME"]
+        else:
+            who = get(f"{base}/users/me")
+            me, my_id = who["username"], who.get("id")
     except Exception as e:
         return lines + [f"- 讀不到 bot 帳號名稱（{e.__class__.__name__}）；可設 repo variable BOT_USERNAME"]
     lines.append(f"- bot 帳號：{me}")
+    if my_id is None:  # BOT_USERNAME set: the id is still needed for forecaster_id
+        try:
+            my_id = get(f"{base}/users/me").get("id")
+        except Exception:
+            my_id = None
+    claude_from = {
+        "正賽": _iso(env.get("MAIN_CLAUDE_FROM") or MAIN_CLAUDE_FROM),
+        "MiniBench": _iso(env.get("MINIBENCH_CLAUDE_FROM") or MINIBENCH_CLAUDE_FROM),
+        # no era given for Market Pulse: defaults to the main-tournament provider switch
+        "Market Pulse 26Q4": _iso(env.get("MARKETPULSE_CLAUDE_FROM") or env.get("MAIN_CLAUDE_FROM") or MAIN_CLAUDE_FROM),
+    }
     boards = [("正賽", env.get("STANDINGS_MAIN_PROJECT") or "33121", True),
               ("MiniBench", env.get("STANDINGS_MINIBENCH_PROJECT") or "minibench", False),
               ("Market Pulse 26Q4", env.get("STANDINGS_MARKETPULSE_PROJECT") or "market-pulse-26q4", False)]
@@ -227,23 +356,34 @@ def standings_lines(
             detail = f"{e.__class__.__name__}: {e}"[:200]
             shape = e.shape if isinstance(e, EntryShapeError) else shape_of(seen[-1]) if seen and seen[-1] is not None else "no response body"
             lines.append(f"- {label}：讀不到排行榜（{detail}）；回應形狀 {shape}"[:400])
+            if is_main:
+                lines.append("- 停損：排行榜讀不到，停損先不判斷")
             continue
         overview = board_overview(payload, me)
+        found = non_metac_standing(entries, me) if entries else None
         if not entries:
             lines.append(f"- {label}：榜上 0 筆")
-            lines.extend(overview)
-            continue
-        found = non_metac_standing(entries, me)
-        if found is None:
+        elif found is None:
             lines.append(f"- {label}：榜上還沒有 {me}（共 {len(entries)} 筆）")
-            lines.extend(overview)
-            continue
-        rank, total, mine = found
-        prize = f"，獎金欄 ${mine.prize:.0f}" if mine.prize else ""
-        lines.append(f"- {label}：第 {rank}/{total}（全榜第 {mine.rank}）{prize}")
+        else:
+            rank, total, mine = found
+            prize = f"，獎金欄 ${mine.prize:.0f}" if mine.prize else ""
+            note = "（不參與停損）" if is_main else ""
+            lines.append(f"- {label}：第 {rank}/{total}（全榜第 {mine.rank}）{prize}{note}")
         lines.extend(overview)
+        # v0.4.10: per-question peer scores, era split, and (main only) the stop-loss verdict
+        cn, ca = 0, None
+        try:
+            rows, keys = fetch_scored(pid, my_id, get, base)
+            sl, cn, ca = score_lines(label, rows, keys, claude_from[label])
+            lines.extend(sl)
+        except Exception as e:
+            lines.append(f"- {label} 逐題分數讀不到（{e.__class__.__name__}: {e}"[:200] + "）")
+            if is_main:
+                lines.append("- 停損：逐題分數讀不到，停損先不判斷")
+                continue
         if is_main:
-            lines.append(f"- 停損：{stop_loss_verdict(rank, total, mine.questions)}")
+            lines.append(f"- 停損：{stop_loss_verdict(cn, ca, _env_float(env, 'STOP_LOSS_MIN_AVG', STOP_LOSS_MIN_AVG))}")
     return lines
 
 

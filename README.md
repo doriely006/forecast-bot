@@ -1,6 +1,6 @@
 # forecast-bot
 
-v0.4.9. A low-cost, fully automated Metaculus bot for the Fall 2026 FutureEval tournament, MiniBench and Market Pulse 26Q4.
+v0.4.10. A low-cost, fully automated Metaculus bot for the Fall 2026 FutureEval tournament, MiniBench and Market Pulse 26Q4.
 Market Pulse 26Q4 (tournament id `market-pulse-26q4`, spot scoring, 12 question groups / 65 questions, all resolved by 12-31) counts as a "main" tournament for budget and pacing; group questions are unpacked into one forecast per subquestion.
 Based on [Metaculus/metac-bot-template](https://github.com/Metaculus/metac-bot-template) at
 `096cb207d643da3090c4830cd828255bf18da2d5` (2026-10-15), forecasting-tools 0.3.4 (locked; `>=0.3.0,<0.4.0`),
@@ -206,8 +206,13 @@ per question. With a 10% margin, 225K big-group tokens per day cover:
 A minimum-tier question past the free allowance costs about $0.09 more. These token counts are unmeasured.
 
 ## Stop-loss
-`standings.py` computes the daily rank among non-`metac-*` bots. After 40 resolved main-tournament
-questions, a rank in the bottom half is reported in the job summary as a stop-loss trigger.
+`standings.py` prints the daily rank among non-`metac-*` bots (rank no longer decides anything) and, per
+tournament (main 33121, MiniBench current slug, Market Pulse 26Q4), every resolved question this bot forecast with its
+`my_forecasts.score_data` peer score, split into eras by the bot's last forecast time: main Claude era
+`>= MAIN_CLAUDE_FROM` (default 2026-11-12T13:55:00Z), MiniBench `>= MINIBENCH_CLAUDE_FROM` (default 2026-11-01T00:00:00Z),
+Market Pulse `>= MARKETPULSE_CLAUDE_FROM` (default = main). Stop-loss (print only, never auto-stops): once 40 main-tournament
+Claude-era questions have resolved and their mean peer score is below `STOP_LOSS_MIN_AVG` (default 0), the job summary says
+"觸發停損" (stop or switch model). Below 40 it prints "Claude 時代已結算 n 題，未滿 40".
 
 ## Files
 | file | role |

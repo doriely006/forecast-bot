@@ -8,6 +8,16 @@ FIX = json.loads((Path(__file__).parent / "fixtures" / "standings.json").read_te
 ME = "fixture-forecast-bot"
 
 
+POSTS: dict = {}
+
+
+def post(pid, last_fc, score, resolved="2026-11-20T00:00:00Z", history=True, extra=None):
+    sd = {"spot_peer_score": score, "baseline_score": 1.0, "coverage": 1.0} if score is not None else {}
+    mine = {"history": [{"start_time": last_fc}] if history else [], "latest": {"start_time": last_fc}, "score_data": sd}
+    return {"id": pid, "question": {"type": "binary", "resolution": "yes", "actual_resolve_time": resolved,
+                                    "my_forecasts": mine, **(extra or {})}}
+
+
 def fake_get(url, headers=None, timeout=30):
     if url.endswith("/users/me"):
         return {"username": ME}
@@ -19,6 +29,8 @@ def fake_get(url, headers=None, timeout=30):
         return FIX["main"]
     if url.endswith("/leaderboards/project/33999/"):
         return FIX["minibench"]
+    if "/posts/?" in url:
+        return POSTS.get(("main" if "tournaments=33121" in url else "other"), {"results": []})
     raise AssertionError(url)
 
 
@@ -29,16 +41,56 @@ def test_rank_among_non_metac_bots():  # C7
     assert standings.non_metac_standing(entries, "nobody") is None
 
 
-def test_stop_loss_rule():  # C7: 40 resolved main questions, bottom 50% of non-metac bots
-    assert "觸發停損" in standings.stop_loss_verdict(4, 5, 44)
-    assert "繼續" in standings.stop_loss_verdict(2, 5, 44)
-    assert "未滿 40" in standings.stop_loss_verdict(5, 5, 39)
-    assert "讀不到" in standings.stop_loss_verdict(5, 5, None)
+def test_stop_loss_rule():  # v0.4.10: Claude-era resolved count and mean peer score, not rank
+    assert "未滿 40" in standings.stop_loss_verdict(39, -50.0)
+    assert "觸發停損" in standings.stop_loss_verdict(40, -0.01)
+    assert "繼續" in standings.stop_loss_verdict(40, 0.0)
+    assert "繼續" in standings.stop_loss_verdict(55, 2.5)
+    assert "觸發停損" in standings.stop_loss_verdict(40, 3.0, min_avg=5.0)  # STOP_LOSS_MIN_AVG override
+
+
+def test_score_data_and_era_split():
+    cut = standings._iso("2026-11-12T13:55:00Z")
+    posts = [post(1, "2026-11-10T00:00:00Z", -40.0), post(2, "2026-11-12T13:55:00Z", 4.0),
+             post(3, 1794700800, 2.0),  # unix seconds, after the cutoff
+             post(4, "2026-11-13T00:00:00Z", None),  # no score yet: not counted
+             post(5, "2026-11-13T00:00:00Z", 9.0, history=False),  # never forecast: skipped
+             post(6, "2026-11-13T00:00:00Z", 9.0, resolved=None, extra={"resolution": None})]  # unresolved
+    rows, keys = [], set()
+    for p in posts:
+        r, k = standings.scored_questions(p)
+        rows += r
+        keys |= k
+    assert keys == {"spot_peer_score", "baseline_score", "coverage"} and len(rows) == 4
+    (cn, ca), (on, oa) = standings.era_stats(rows, cut)
+    assert (cn, ca) == (2, 3.0) and (on, oa) == (1, -40.0)
+    lines = "\n".join(standings.score_lines("正賽", rows, keys, cut)[0])
+    assert "Claude 時代" in lines and "n=2，每題平均 peer score +3.00" in lines and "舊時代 n=1" in lines
+    assert "post 1｜binary｜" in lines and "peer -40.00" in lines
+
+
+def _main_with(n_new, score_new, n_old=3):
+    POSTS["main"] = {"results": [post(i, "2026-11-10T00:00:00Z", -20.0) for i in range(n_old)]
+                     + [post(100 + i, "2026-11-15T00:00:00Z", score_new) for i in range(n_new)]}
+
+
+def test_stop_loss_three_states_in_summary():
+    env = {"METACULUS_TOKEN": "t"}
+    _main_with(39, -3.0)
+    assert "停損：Claude 時代已結算 39 題，未滿 40" in "\n".join(standings.standings_lines(env, fake_get))
+    _main_with(40, -3.0)
+    out = "\n".join(standings.standings_lines(env, fake_get))
+    assert "觸發停損" in out and "n=40，每題平均 peer score -3.00" in out and "舊時代 n=3，每題平均 peer score -20.00" in out
+    _main_with(40, 3.0)
+    out = "\n".join(standings.standings_lines(env, fake_get))
+    assert "觸發停損" not in out and "停損：Claude 時代已結算 40 題" in out and "繼續" in out
+    POSTS.clear()
 
 
 def test_summary_lines_from_fixture():
     lines = "\n".join(standings.standings_lines({"METACULUS_TOKEN": "t"}, fake_get))
-    assert "正賽：第 4/5（全榜第 6）" in lines and "觸發停損" in lines
+    POSTS.clear()
+    assert "正賽：第 4/5（全榜第 6）（不參與停損）" in lines and "未滿 40" in lines and "觸發停損" not in lines
     assert "MiniBench：第 1/2（全榜第 2），獎金欄 $120" in lines
     assert "Market Pulse 26Q4：第 1/2（全榜第 2），獎金欄 $120" in lines  # v0.4.9: third board, no stop-loss line
     assert lines.count("停損：") == 1

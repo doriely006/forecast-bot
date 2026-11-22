@@ -2,6 +2,12 @@
 
 ## 收工日誌
 
+### 2026-11-22 v0.4.10 逐題分數＋停損改量尺＋研究 Sonnet
+- standings.py：每賽事 `/posts/?tournaments=<id>&statuses=resolved&forecaster_id=<me>&with_cp=true` 分頁（沿用 3s 間隔＋429 退避），印逐題 post id／題型／結算時間／最後預測時間／peer（`spot_peer_score`，無則 `peer_score`）＋score_data keys。依最後預測時間分時代：正賽 `MAIN_CLAUDE_FROM`（2026-11-12T13:55:00Z）、MiniBench `MINIBENCH_CLAUDE_FROM`（2026-11-01T00:00:00Z）、Market Pulse `MARKETPULSE_CLAUDE_FROM`（預設＝正賽）；repo variable 可覆蓋（workflow standings step 已傳入）。
+- 停損：正賽 Claude 時代已結算 >=40 且每題平均 < `STOP_LOSS_MIN_AVG`（預設 0）→ 印「觸發停損」（只印不自動停）；未滿印「Claude 時代已結算 n 題，未滿 40」。名次照印、不參與判斷。README Stop-loss 段同步。
+- 研究 model：repo variable `ANTHROPIC_RESEARCH_MODEL=claude-sonnet-5-5`（researcher／summarizer／parser 共用，約 +$0.22/題，user 同意）；budget.py 單價表已有 sonnet-5-5 $2／$10、配速經 anthropic_models 讀同一變數。main.py `_log_research` 每題多印 `RESEARCHMODEL <post id> <model>`，用來分 Haiku 題與 Sonnet 題。未驗：下一輪有題時看 log。
+- 測試：test_standings 加 score_data／時代切分／停損三態；pytest 除既有 test_fallback_is_charged_to_the_openai_ledger 外全綠。版號 0.4.10（五處）。
+
 ### 2026-11-22 研究段 Haiku -> Sonnet（user 拍板，推翻同日「不調」判決）
 - user 原話：「改，其實額度夠，haiku要改sonnet 可以」。只動 repo variable：`ANTHROPIC_RESEARCH_MODEL=claude-sonnet-5-5`（12:48Z 設）。沒改 code、沒 bump。
 - 連帶：摘要／解析共用同一個 model（budget.anthropic_models），也一起變 Sonnet；估 +$0.22／題（full 約 $0.47 -> $0.69，配速 $0.95／題仍 full）。價目表已有 sonnet (2/10)，不用設 ANTHROPIC_RESEARCH_PRICE。
@@ -13,7 +19,7 @@
 - 判決：預測策略不調，等 MiniBench 33169（11-16～12-04）結算後只看 Claude 時代題再判；每題平均 < -10 才算有問題 [G 門檻]，屆時先動研究端（搜尋次數／Sonnet），不動預測次數／effort／clip。
 - 正賽 -51.1：前 4 題 11-11 01:20Z 前結算（+1.63 -> -46.03），provider 11-12 13:55Z 才切 → 是 OpenAI 的帳；第 5 題（11-20，-5.1）歸屬未知。Claude 乾淨樣本＝MiniBench 33135 17 題 +85.7（每題 +5.0，多為 x1）。
 - 設計：binary 中位數＋clip [3%,97%]、無 extremize（guards.py:24-25），clip 成本可忽略；數值題佔正賽 43%／MiniBench 52%，真要查是分布寬度；5 次預測共用 1 份研究（main.py:1037）。
-- 待 user 拍板：停損看正賽總名次＝含 GPT 舊債與覆蓋率效應，建議改看 Claude 時代每題平均。前置：接 `my_forecasts.score_data`（API 有、bot 沒讀）才有逐題分數。
+- 已做（v0.4.10）：user 拍板停損改看 Claude 時代每題平均 peer score（見 v0.4.10 條）；score_data 已接。
 
 ### 2026-11-22 過去幾輪 MiniBench 成績
 - run 44974671533（一次性查詢，已刪）。榜是 spot_peer_tournament、finalized、獎池 $1,000，bot 兩輪都 prize 0、無獎金。

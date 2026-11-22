@@ -50,7 +50,7 @@ import guards  # noqa: E402
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
-VERSION = "0.4.9"
+VERSION = "0.4.10"
 RESEARCH_LOG_MAX_CHARS = 6000
 
 # Model choice (explicit candidate lists, per-tournament config) lives in
@@ -648,6 +648,8 @@ class ForecastBot2026(ForecastBot):
                 body = (body[:RESEARCH_LOG_MAX_CHARS]
                         + f"\n[truncated {len(body) - RESEARCH_LOG_MAX_CHARS} chars]")
             body = re.sub(r"(?m)^(\s*)::", r"\1: :", body)  # neutralize workflow commands
+            qid = getattr(question, "id_of_post", None) or getattr(question, "id_of_question", None) or "?"
+            print(f"RESEARCHMODEL {qid} {model}")  # v0.4.10: tells Haiku-era questions from Sonnet-era ones
             print(f"::group::RESEARCH {question.page_url} provider={provider} model={model}")
             print(body)
             print("::endgroup::", flush=True)
