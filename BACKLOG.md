@@ -68,7 +68,8 @@
 - Haiku 研究初看（只讀了 46016 一題）：對題、有日期、引 SEC／NVIDIA 原始稿、有 base rate。正式複查仍待累積 8～10 題。
 - ~~🟡 precheck 把 Market Pulse 已截止／未開的 subquestion 也算開放（列 69、實際可答 5）-> 每 20 分鐘都判有工作、job 空轉（不花 LLM）。修法：precheck 展開 group 時照 subquestion 自己的 open／close 時間過濾。~~ v0.4.6 已做。
 - ~~🟡 Market Pulse 榜沒接進 standings.py。~~ v0.4.8 已做。
-- 🟡 MiniBench 榜讀到 0 筆，但 bot 有在交 MiniBench 題；slug `minibench` 可能解析到別的 round（standings.py）。未查。
+- ✅ MiniBench 榜 0 筆（11-22 查，run 44974267093，診斷檔已刪）：id／slug 沒錯。`minibench`＝project 33169（question_series，11-16～12-04），bot 交的題（如 46618–46620）的 default_project／question_series 都是 33169；唯一 board id 1046 `spot_peer_tournament`、finalized=False、0 筆。
+  `statuses=resolved` 查 MiniBench 回 0 題（只有 closed）＝還沒有任何題結算，沒分數所以榜空；不是 standings.py 的錯，不用改 code。建議：12-04 該輪收尾、題開始結算後再看一次；到時仍 0 筆才再查。注意 slug 每輪可能換 project（11-04 條看的是上一輪，未驗證是否同 id）。
 - 沒驗：備援真觸發；Console 與本機帳對帳（本機 11-01 起從 $0 算，Console 11 月另有 $1.56）。
 
 ### 2026-11-12 v0.4.5 加 Market Pulse 26Q4
