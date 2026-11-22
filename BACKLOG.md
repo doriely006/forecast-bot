@@ -2,6 +2,12 @@
 
 ## 收工日誌
 
+### 2026-11-22 策略檢討（Fable session，唯讀）
+- 判決：預測策略不調，等 MiniBench 33169（11-16～12-04）結算後只看 Claude 時代題再判；每題平均 < -10 才算有問題 [G 門檻]，屆時先動研究端（搜尋次數／Sonnet），不動預測次數／effort／clip。
+- 正賽 -51.1：前 4 題 11-11 01:20Z 前結算（+1.63 -> -46.03），provider 11-12 13:55Z 才切 → 是 OpenAI 的帳；第 5 題（11-20，-5.1）歸屬未知。Claude 乾淨樣本＝MiniBench 33135 17 題 +85.7（每題 +5.0，多為 x1）。
+- 設計：binary 中位數＋clip [3%,97%]、無 extremize（guards.py:24-25），clip 成本可忽略；數值題佔正賽 43%／MiniBench 52%，真要查是分布寬度；5 次預測共用 1 份研究（main.py:1037）。
+- 待 user 拍板：停損看正賽總名次＝含 GPT 舊債與覆蓋率效應，建議改看 Claude 時代每題平均。前置：接 `my_forecasts.score_data`（API 有、bot 沒讀）才有逐題分數。
+
 ### 2026-11-22 過去幾輪 MiniBench 成績
 - run 44974671533（一次性查詢，已刪）。榜是 spot_peer_tournament、finalized、獎池 $1,000，bot 兩輪都 prize 0、無獎金。
 - 33132（10-19～11-06）：全榜 137/410，非 metac 153/321，score 99.6，contribution 1（只答到 1 題，rank CI 99–184）。
