@@ -2,6 +2,12 @@
 
 ## 收工日誌
 
+### 2026-11-22 Anthropic 帳對 Console（user 截 Daily token cost 表）
+- Console 11-01～11-21（UTC）合計 $10.02（Opus＋Haiku；11-22 $0）；bot 本機帳到 11-21 21:44Z＝$10.86 → bot 高估約 8%，方向安全，不改 budget.py。
+- 拆段：到 11-14 Console $2.36 vs bot $1.74（重置日 13->1 換期少記 $0.62）；11-15～11-21 Console $7.66 vs bot $9.12（高估 19%，單價表或 token 估偏高）。兩段互抵。
+- 注意：截圖是全 org 表、沒 group by API key，若含 claude -p，bot 實花只會更低，結論不變。
+- 用量：月上限 $100、本期實花 ~$10；題數是瓶頸不是預算（開放題 9）。
+
 ### 週檢 2026-11-15
 - 「Forecast on tournament questions」11-08 起：success 32／failure 0，每天都有成功 run；最後一輪 11-14 23:50Z（43655205056，v0.4.8）。
 - 本週新交 19（排除上週已計的 42435950328；含 43231898167 Market Pulse 5 題）；失敗 0；預算不足跳過 0；臨截止跳過 2；截止前重答 0（還沒有題進 12h 視窗）。
