@@ -9,6 +9,8 @@
 - 用量：月上限 $100、本期實花 ~$10；題數是瓶頸不是預算（開放題 9）。
 - 新洞：standings.py 連打三個 board，MiniBench／Market Pulse 每輪 429（近 30 輪無一次讀到 Market Pulse 榜）；修法＝board 間 sleep＋429 退避重試，待 user 說修。
 - 名次快照：正賽 11-21 非 metac 第 378/501（全榜 357，score -51.1），結算 5 題；11-19 前 288/397。
+- 加碼評估（Fable 11-22，唯讀）：三賽事都只計截止當下那筆（spot），提高更新頻率無效，已死。真洞＝覆蓋率：cron 寫 72 次/天、實觸發 2–5 次/天（11-14～21 已驗），正賽／MiniBench 每題只開 3h → 估只答到三到四成題（MiniBench 46569–46615 連號 47 只見 20）。建議 A＝tournament.yaml 單 job 內每 20 分迴圈約 5h（timeout 350、cron 當重啟器），注意 .state 只在 job 尾存；之後才考慮 ANTHROPIC_EFFORT high。研究換 Sonnet 實際 +$0.22/題（main.py:304-309 研究／摘要／解析共用 model）。待 user 開工閘門。
+- 小錯：README／docs/RESEARCH.md 的 Market Pulse 獎池 $7,000 是 Q3，26Q4＝$7,500。
 
 ### 週檢 2026-11-15
 - 「Forecast on tournament questions」11-08 起：success 32／failure 0，每天都有成功 run；最後一輪 11-14 23:50Z（43655205056，v0.4.8）。
