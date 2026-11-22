@@ -14,6 +14,7 @@ on:
 # code from other people's pull requests.
 permissions:
   contents: read
+  actions: write # only to start the next loop run (gh workflow run)
 
 # Never run two copies at once.
 concurrency:
@@ -27,7 +28,7 @@ jobs:
     # run fail with the reason (precheck.py). Sending needs PUBLISH=1.
     if: github.event_name == 'workflow_dispatch' || vars.BOT_ENABLED != ''
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 350 # loop 300 min + cap; GitHub max is 360
     env:
       PYTHONUNBUFFERED: "1"
       BOT_ENABLED: ${{ vars.BOT_ENABLED }}
@@ -102,50 +103,99 @@ jobs:
           path: .state
           key: state-${{ github.run_id }}
           restore-keys: state-
-      # Light step on the runner's own Python, nothing installed: checks the
-      # switches, lists open questions, re-sends pending comments, and decides
-      # whether there is anything to forecast. Idle runs end here.
-      - name: Quick check
-        id: precheck
-        run: python3 precheck.py
-        env:
-          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GITHUB_TOKEN: ${{ github.token }}
-          REPO_PRIVATE: ${{ github.event.repository.private }}
       - name: Standings (once a day)
         continue-on-error: true
         run: python3 standings.py --daily
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+      # v0.4.9: install once, whatever precheck says (the loop below may need it
+      # any round). Cache hit = seconds.
       - name: Set up Python
-        if: steps.precheck.outputs.work == 'true'
         id: setup-python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - name: Load cached venv
-        if: steps.precheck.outputs.work == 'true'
         id: venv-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .venv
           key: venv-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('poetry.lock') }}
       - name: Install poetry (cache miss only)
-        if: steps.precheck.outputs.work == 'true' && steps.venv-cache.outputs.cache-hit != 'true'
+        if: steps.venv-cache.outputs.cache-hit != 'true'
         uses: snok/install-poetry@a783c322200f0519c7926aa6faa857c4e23e9263 # v1.4.2
         with:
           virtualenvs-create: true
           virtualenvs-in-project: true
           installer-parallel: true
       - name: Install dependencies (cache miss only)
-        if: steps.precheck.outputs.work == 'true' && steps.venv-cache.outputs.cache-hit != 'true'
+        if: steps.venv-cache.outputs.cache-hit != 'true'
         run: poetry install --no-interaction --no-root --without dev
-      - name: Run bot
-        if: steps.precheck.outputs.work == 'true'
-        run: .venv/bin/python main.py --mode tournament
+      # v0.4.9: GitHub fires the cron only 2-5 times a day, but questions are open
+      # ~3h. So one job loops for up to 300 min: every round = precheck.py (light,
+      # system Python) -> main.py only if it says work=true -> sleep to the next
+      # :07/:27/:47 UTC. precheck exit 1 (BOT_ENABLED not 1, budget/systemic) ends
+      # the job red. main.py failing 3 rounds in a row ends it red too. Normal end
+      # -> the next step hands over to a fresh run (relay).
+      - name: Run bot (loop)
+        id: loop
+        shell: bash
+        run: |
+          set -u
+          LOOP_MIN=300       # no new round after this; timeout-minutes is 350
+          MAIN_CAP_MIN=325   # a round's main.py is killed at this loop minute
+          START=$SECONDS
+          mkdir -p .state
+          fails=0
+          round=0
+          while :; do
+            round=$((round + 1))
+            echo "::group::round $round precheck $(date -u +%FT%TZ)"
+            echo "round $round precheck at $(date -u +%FT%TZ)"
+            export GITHUB_OUTPUT="$RUNNER_TEMP/precheck_out_$round"
+            : > "$GITHUB_OUTPUT"
+            python3 precheck.py && pc=0 || pc=$?
+            [ -f .state/changed ] && touch "$RUNNER_TEMP/state_changed"
+            echo "::endgroup::"
+            if [ "$pc" -ne 0 ]; then
+              echo "::error::precheck failed (exit $pc), loop stops"
+              exit "$pc"
+            fi
+            if grep -qx 'work=true' "$GITHUB_OUTPUT"; then
+              left=$(( MAIN_CAP_MIN * 60 - (SECONDS - START) ))
+              [ "$left" -lt 60 ] && left=60
+              echo "round $round main.py at $(date -u +%FT%TZ) (cap ${left}s)"
+              timeout "$left" .venv/bin/python main.py --mode tournament && mc=0 || mc=$?
+              [ -f .state/changed ] && touch "$RUNNER_TEMP/state_changed"
+              if [ "$mc" -ne 0 ]; then
+                fails=$((fails + 1))
+                echo "::warning::main.py exit $mc (consecutive failures: $fails)"
+                if [ "$fails" -ge 3 ]; then
+                  echo "::error::main.py failed 3 rounds in a row, loop stops"
+                  exit "$mc"
+                fi
+              else
+                fails=0
+              fi
+            else
+              echo "round $round: no work"
+            fi
+            if [ "${DRY_RUN_LLM:-}" = "1" ]; then
+              echo "dry_run_llm: single round"
+              break
+            fi
+            # sleep to the next :07/:27/:47 UTC
+            m=$(date -u +%-M); s=$(date -u +%-S); wait=0
+            for t in 7 27 47 67; do
+              if [ "$t" -gt "$m" ]; then wait=$(( (t - m) * 60 - s )); break; fi
+            done
+            if [ $(( SECONDS - START + wait )) -ge $(( LOOP_MIN * 60 )) ]; then
+              echo "loop deadline reached after round $round ($(date -u +%FT%TZ))"
+              break
+            fi
+            echo "sleeping ${wait}s (until $(date -u -d "+${wait} seconds" +%FT%TZ))"
+            sleep "$wait"
+          done
         # Keys come only from repository secrets; switches from repository variables.
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
@@ -154,7 +204,26 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
           SUMMARY_HEADER_DONE: "1"
+      # Relay: only after a normal end (success()), only while BOT_ENABLED=1, never
+      # for a dry_run_llm dispatch. Cancelled/failed jobs do not relay (cron restarts).
+      # The concurrency group keeps one pending run, so this and a queued cron run
+      # never run side by side.
+      - name: Hand over to the next run
+        if: success() && vars.BOT_ENABLED == '1' && inputs.dry_run_llm != true
+        run: gh workflow run tournament.yaml --ref main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+      # precheck.py clears .state/changed every round; the loop remembers any
+      # round that changed state, and this puts the flag back before the save.
+      - name: Mark state changed
+        if: always()
+        run: |
+          mkdir -p .state
+          if [ -f "$RUNNER_TEMP/state_changed" ]; then touch .state/changed; fi
       - name: Save comments waiting to be re-sent
         if: always() && hashFiles('.state/changed') != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0

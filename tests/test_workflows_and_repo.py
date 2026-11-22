@@ -62,7 +62,7 @@ def test_test_bot_is_manual_only():
 
 def _run_env(name):
     job = load(name)["jobs"]["forecast_job"]
-    step = next(s for s in job["steps"] if s.get("name") == "Run bot")
+    step = next(s for s in job["steps"] if s.get("name") in ("Run bot", "Run bot (loop)"))
     return {**job.get("env", {}), **step["env"]}
 
 
@@ -93,26 +93,61 @@ def test_workflows_locked_down():  # B6, B10, override 3
     for name in ("tournament.yaml", "test_bot.yaml"):
         wf = load(name)
         raw = (WF / name).read_text()
-        assert wf["permissions"] == {"contents": "read"}
+        if name == "tournament.yaml":
+            assert wf["permissions"] == {"contents": "read", "actions": "write"}  # v0.4.9: relay only
+        else:
+            assert wf["permissions"] == {"contents": "read"}
         assert set(wf["on"]) <= {"workflow_dispatch", "schedule"}
         assert "pull_request" not in raw
         assert wf["concurrency"]["cancel-in-progress"] is False
         job = wf["jobs"]["forecast_job"]
-        assert job["timeout-minutes"] == 40
+        assert job["timeout-minutes"] == (350 if name == "tournament.yaml" else 40)
         for step in job["steps"]:
             if "uses" in step:
                 assert re.fullmatch(r"[\w./-]+@[0-9a-f]{40}", step["uses"]), step["uses"]
 
 
-def test_idle_run_skips_heavy_steps():  # B14
-    steps = load("tournament.yaml")["jobs"]["forecast_job"]["steps"]
+def test_loop_job_shape():  # v0.4.9: in-job loop + relay
+    wf = load("tournament.yaml")
+    steps = wf["jobs"]["forecast_job"]["steps"]
     names = [s["name"] for s in steps]
-    assert names.index("Quick check") < names.index("Set up Python")
-    assert next(s for s in steps if s["name"] == "Quick check")["run"] == "python3 precheck.py"
+    # install happens once, before the loop, whatever precheck says
+    assert names.index("Install dependencies (cache miss only)") < names.index("Run bot (loop)")
     for s in steps:
         if s["name"] in ("Set up Python", "Load cached venv", "Install poetry (cache miss only)",
-                         "Install dependencies (cache miss only)", "Run bot"):
-            assert "steps.precheck.outputs.work == 'true'" in s["if"], s["name"]
+                         "Install dependencies (cache miss only)"):
+            assert "precheck" not in s.get("if", ""), s["name"]
+    loop = next(s for s in steps if s["name"] == "Run bot (loop)")["run"]
+    assert "python3 precheck.py" in loop and "main.py --mode tournament" in loop
+    assert "work=true" in loop and "GITHUB_OUTPUT" in loop and "sleep" in loop
+    assert "exit \"$pc\"" in loop  # precheck failure (BOT_ENABLED != 1) stops the loop
+    loop_min = int(re.search(r"LOOP_MIN=(\d+)", loop).group(1))
+    cap_min = int(re.search(r"MAIN_CAP_MIN=(\d+)", loop).group(1))
+    timeout = wf["jobs"]["forecast_job"]["timeout-minutes"]
+    assert loop_min < cap_min < timeout <= 360
+    # standings stay out of the loop (once a day, before it)
+    assert "standings" not in loop and names.index("Standings (once a day)") < names.index("Run bot (loop)")
+
+
+def test_relay_only_after_normal_end_and_never_for_dry_run():
+    steps = load("tournament.yaml")["jobs"]["forecast_job"]["steps"]
+    relay = next(s for s in steps if s["name"] == "Hand over to the next run")
+    assert relay["run"] == "gh workflow run tournament.yaml --ref main"
+    cond = relay["if"]
+    assert "success()" in cond and "vars.BOT_ENABLED == '1'" in cond and "inputs.dry_run_llm != true" in cond
+    assert "always()" not in cond
+    names = [s["name"] for s in steps]
+    save = steps[names.index("Save comments waiting to be re-sent")]
+    assert save["if"].startswith("always()")
+    assert names.index("Mark state changed") < names.index("Save comments waiting to be re-sent")
+    assert steps[names.index("Mark state changed")]["if"] == "always()"
+
+
+def test_no_pull_request_trigger_anywhere():
+    for name in ("tournament.yaml", "test_bot.yaml"):
+        wf = load(name)
+        assert not [k for k in wf["on"] if "pull_request" in str(k)]
+        assert "pull_request" not in (WF / name).read_text()
 
 
 def test_light_modules_need_no_installed_packages():  # B14

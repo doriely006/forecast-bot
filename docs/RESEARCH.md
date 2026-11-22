@@ -5,7 +5,7 @@
 - 官方頁 [V] https://www.metaculus.com/tournament/fall-futureeval-2026/ ；slug `fall-futureeval-2026`；數字 ID 查不到（程式用 client.CURRENT_AI_COMPETITION_ID，MiniBench 用 client.CURRENT_MINIBENCH_ID，見範本 main.py）
 - 公告 [V] https://forum.effectivealtruism.org/posts/hrJrsgMCwsdBuAqgQ/announcing-fall-2026-futureeval-bot-tournament ；https://www.metaculus.com/notebooks/45615/announcement-of-futureeval-fall-2026/
 - 參加說明頁 https://www.metaculus.com/futureeval/participate/ （403，沒讀到）；資源頁 https://www.metaculus.com/notebooks/38928/ai-benchmark-resources/ [V]
-- 獎金 [V]：每季 $50k 池，300–400 題。MiniBench 每個兩週賽 $1,000、約 60 題、全自動出題/結算（較吵）。Market Pulse Q3 $7,000（bot 可拿）。Metaculus Cup bot 不領獎。
+- 獎金 [V]：每季 $50k 池，300–400 題。MiniBench 每個兩週賽 $1,000、約 60 題、全自動出題/結算（較吵）。Market Pulse 26Q4 $7,500（Q3 是 $7,000；bot 可拿）。Metaculus Cup bot 不領獎。
 - 日期 [V]：MiniBench warmup 2026-09-21 00:00 UTC 起（多數題前幾天開，第二週通常無新題）；正賽題 09-28 起開，前 1–2 週慢；加入窗到「題目停開」（約 2027-01-01 前幾週）；晚進場從 0 分、排行榜中段起。Summer 獎金目標 10–11 月發。
 - 名次數／分配：查不到（公告與 notebook 都沒寫）。
 - 每題開放多久：查不到。
@@ -29,7 +29,7 @@
 - 結構 [V]：main.py（forecasting-tools 版，建議）、main_with_no_framework.py、bot_helpers.py、integrations/、.claude/skills、pyproject.toml、poetry.lock、.env.template、.github/workflows/{test_bot,run_bot_on_tournament,run_bot_on_metaculus_cup,review_bot}.yaml
 - Python ^3.11（workflow 用 3.11）；套件管理 Poetry（pyproject package-mode=false）；forecasting-tools ">=0.2.90,<0.4.0"（公告要求升 v0.3.0；實際鎖版本在 poetry.lock，沒查）；另 asknews ^0.13.11、openai ^2.0.0、numpy ^2.3.0。
 - 選賽事：main.py --mode {tournament|metaculus_cup|test_questions}，預設 tournament＝先跑 client.CURRENT_AI_COMPETITION_ID 再跑 client.CURRENT_MINIBENCH_ID；test_questions＝"bot-testing-area"（ID 32977 per 公告）。
-- Actions 排程 [V]：run_bot_on_tournament.yaml cron "7,27,47 * * * *"（每 20 分）；metaculus_cup "0 0 */2 * *"（每 2 天）；test_bot 僅 workflow_dispatch；concurrency 不並行；runs-on ubuntu-latest。
+- Actions 排程 [V]：run_bot_on_tournament.yaml cron "7,27,47 * * * *"（每 20 分；實際 GitHub 只觸發 2–5 次/天，v0.4.9 起靠 job 內迴圈）；metaculus_cup "0 0 */2 * *"（每 2 天）；test_bot 僅 workflow_dispatch；concurrency 不並行；runs-on ubuntu-latest。
 - Secrets/env [V]：必要 METACULUS_TOKEN＋至少一個 LLM key（建議 OPENROUTER_API_KEY）；可選 OPENAI_API_KEY、ANTHROPIC_API_KEY、PERPLEXITY_API_KEY、EXA_API_KEY、ASKNEWS_CLIENT_ID、ASKNEWS_SECRET。（Settings → Secrets and variables → Actions → New repository secret）
 - comment 怎麼送：框架自動——publish_reports_to_metaculus=True 時把 report explanation 當 comment 送出（main.py 設 extra_metadata_in_explanation=True）。我沒追進 forecasting-tools 原始碼確認 API 細節 → 記憶/推論，未驗證。
 - 只預測不送出 [V，README]：main.py 把 FallTemplateBot2026(...) 的 publish_reports_to_metaculus=False（目前由 main 內 publish_to_metaculus = True 變數控制）；no_framework 版設 SUBMIT_PREDICTION=False。注意 test_questions 模式仍會送到 bot-testing-area（除非改 False）。

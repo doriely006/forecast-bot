@@ -7,7 +7,12 @@ Based on [Metaculus/metac-bot-template](https://github.com/Metaculus/metac-bot-t
 Python 3.12 on GitHub Actions. Spec: `docs/SPEC.md`. No human edits any individual forecast.
 
 ## How it works
-A scheduled workflow runs every 20 minutes (`7,27,47 * * * *`).
+The bot checks for new questions every 20 minutes. GitHub's cron is unreliable (it fired only 2-5 times a day,
+while a question is open for ~3 hours), so one workflow run loops inside the job for about 5 hours: each round
+runs `precheck.py` and, only if it finds work, `main.py`, then sleeps until the next :07/:27/:47 UTC. When the loop
+ends normally and `BOT_ENABLED=1`, the run starts the next one itself (`gh workflow run`, `actions: write`);
+the cron (`7,27,47 * * * *`) is only a restarter, and the concurrency group keeps a single run at a time.
+Each round is one step; `.state` (spend, failure counts, pending comments) is saved once, at the end of the job.
 1. `precheck.py` (standard library only) lists open questions of both tournaments, re-sends pending
    comments, reads the budget (OpenRouter key balance, or the locally tracked Anthropic / OpenAI usage) and
    decides whether there is work. Idle runs stop here.

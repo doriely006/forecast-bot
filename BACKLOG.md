@@ -2,6 +2,13 @@
 
 ## 收工日誌
 
+### 2026-11-22 v0.4.9 job 內迴圈＋接力
+- tournament.yaml：單 job 迴圈 300 分（timeout 350、main.py 單輪上限 325 分處被 timeout 砍）；每輪 precheck（輸出寫每輪暫存 GITHUB_OUTPUT、bash 解析 work=true）→ 有工作才跑 main.py → sleep 到下個 :07/:27/:47 UTC。venv／poetry 改迴圈前裝一次。standings --daily 仍在迴圈外。
+- precheck exit≠0（BOT_ENABLED≠1／系統性）→ 迴圈直接紅燈結束；main.py 連 3 輪失敗也停。dry_run_llm 只跑 1 輪、不接力。
+- 接力：正常結束＋vars.BOT_ENABLED=='1'＋非 dry_run_llm → `gh workflow run tournament.yaml --ref main`（permissions 加 actions: write）。取消／失敗不接力，cron 當重啟器；concurrency 只留一個 pending，排隊的 cron 與接力不會疊跑。
+- .state：仍只在 job 尾存一次（cache 同 key 不可覆寫；artifact 評估後不做）。precheck 每輪清 `.state/changed`，故迴圈每輪記旗標、「Mark state changed」(always) 補回再存。強殺（runner 掛）仍可能漏最後一段花費，取消／timeout 走得到 always。
+- 測試改 test_workflows_and_repo（timeout／permissions／接力條件／無 pull_request／迴圈形狀）。README、docs/RESEARCH.md 同步，Market Pulse 獎池 26Q4＝$7,500。
+
 ### 2026-11-22 v0.4.9 standings 429 退避
 - standings.py：每個 API 請求前 sleep 3s（首發除外）；HTTP 429 退避重試最多 4 次，有 Retry-After 照它、否則 15／30／60／120s，單次上限 120s，整輪累計上限 480s，超過就拋出、照舊印「讀不到排行榜」。
 - 非 429 的 HTTPError 不重試。`standings_lines(env, get_json, sleep=None)`：sleep 可注入（預設 time.sleep）。
@@ -15,7 +22,7 @@
 - 用量：月上限 $100、本期實花 ~$10；題數是瓶頸不是預算（開放題 9）。
 - 已修（v0.4.9）：standings.py 連打三個 board 的 429 問題；board 間 sleep＋429 退避重試，見 2026-11-22 v0.4.9 條。
 - 名次快照：正賽 11-21 非 metac 第 378/501（全榜 357，score -51.1），結算 5 題；11-19 前 288/397。
-- 加碼評估（Fable 11-22，唯讀）：三賽事都只計截止當下那筆（spot），提高更新頻率無效，已死。真洞＝覆蓋率：cron 寫 72 次/天、實觸發 2–5 次/天（11-14～21 已驗），正賽／MiniBench 每題只開 3h → 估只答到三到四成題（MiniBench 46569–46615 連號 47 只見 20）。建議 A＝tournament.yaml 單 job 內每 20 分迴圈約 5h（timeout 350、cron 當重啟器），注意 .state 只在 job 尾存；之後才考慮 ANTHROPIC_EFFORT high。研究換 Sonnet 實際 +$0.22/題（main.py:304-309 研究／摘要／解析共用 model）。待 user 開工閘門。
+- 加碼評估（Fable 11-22，唯讀）：三賽事都只計截止當下那筆（spot），提高更新頻率無效，已死。真洞＝覆蓋率：cron 寫 72 次/天、實觸發 2–5 次/天（11-14～21 已驗），正賽／MiniBench 每題只開 3h → 估只答到三到四成題（MiniBench 46569–46615 連號 47 只見 20）。建議 A＝tournament.yaml 單 job 內每 20 分迴圈約 5h（timeout 350、cron 當重啟器），注意 .state 只在 job 尾存；之後才考慮 ANTHROPIC_EFFORT high。研究換 Sonnet 實際 +$0.22/題（main.py:304-309 研究／摘要／解析共用 model）。已做（v0.4.9 job 內迴圈＋接力，見上條）。
 - 小錯：README／docs/RESEARCH.md 的 Market Pulse 獎池 $7,000 是 Q3，26Q4＝$7,500。
 
 ### 週檢 2026-11-15
@@ -61,6 +68,7 @@
 - Haiku 研究初看（只讀了 46016 一題）：對題、有日期、引 SEC／NVIDIA 原始稿、有 base rate。正式複查仍待累積 8～10 題。
 - ~~🟡 precheck 把 Market Pulse 已截止／未開的 subquestion 也算開放（列 69、實際可答 5）-> 每 20 分鐘都判有工作、job 空轉（不花 LLM）。修法：precheck 展開 group 時照 subquestion 自己的 open／close 時間過濾。~~ v0.4.6 已做。
 - ~~🟡 Market Pulse 榜沒接進 standings.py。~~ v0.4.8 已做。
+- 🟡 MiniBench 榜讀到 0 筆，但 bot 有在交 MiniBench 題；slug `minibench` 可能解析到別的 round（standings.py）。未查。
 - 沒驗：備援真觸發；Console 與本機帳對帳（本機 11-01 起從 $0 算，Console 11 月另有 $1.56）。
 
 ### 2026-11-12 v0.4.5 加 Market Pulse 26Q4
