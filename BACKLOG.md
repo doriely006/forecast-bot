@@ -21,6 +21,7 @@
 - 接力：正常結束＋vars.BOT_ENABLED=='1'＋非 dry_run_llm → `gh workflow run tournament.yaml --ref main`（permissions 加 actions: write）。取消／失敗不接力，cron 當重啟器；concurrency 只留一個 pending，排隊的 cron 與接力不會疊跑。
 - .state：仍只在 job 尾存一次（cache 同 key 不可覆寫；artifact 評估後不做）。precheck 每輪清 `.state/changed`，故迴圈每輪記旗標、「Mark state changed」(always) 補回再存。強殺（runner 掛）仍可能漏最後一段花費，取消／timeout 走得到 always。
 - 測試改 test_workflows_and_repo（timeout／permissions／接力條件／無 pull_request／迴圈形狀）。README、docs/RESEARCH.md 同步，Market Pulse 獎池 26Q4＝$7,500。
+- 真跑 44973299394（01:50～06:47Z，success）：16 輪、每 20 分一次、全 no work（開放題只剩 Market Pulse 8 題且已答）；收尾接力觸發 44995283618（06:47Z workflow_dispatch）✅。期間無 cron 輪疊跑。未驗：迴圈內有工作的一輪（main.py 跑完、.state 存檔、花費記到）——等 11-22 16:00Z 起 Market Pulse 8 題截止前重答。
 
 ### 2026-11-22 v0.4.9 standings 429 退避
 - standings.py：每個 API 請求前 sleep 3s（首發除外）；HTTP 429 退避重試最多 4 次，有 Retry-After 照它、否則 15／30／60／120s，單次上限 120s，整輪累計上限 480s，超過就拋出、照舊印「讀不到排行榜」。
