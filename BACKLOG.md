@@ -7,6 +7,8 @@
 - 拆段：到 11-14 Console $2.36 vs bot $1.74（重置日 13->1 換期少記 $0.62）；11-15～11-21 Console $7.66 vs bot $9.12（高估 19%，單價表或 token 估偏高）。兩段互抵。
 - 注意：截圖是全 org 表、沒 group by API key，若含 claude -p，bot 實花只會更低，結論不變。
 - 用量：月上限 $100、本期實花 ~$10；題數是瓶頸不是預算（開放題 9）。
+- 新洞：standings.py 連打三個 board，MiniBench／Market Pulse 每輪 429（近 30 輪無一次讀到 Market Pulse 榜）；修法＝board 間 sleep＋429 退避重試，待 user 說修。
+- 名次快照：正賽 11-21 非 metac 第 378/501（全榜 357，score -51.1），結算 5 題；11-19 前 288/397。
 
 ### 週檢 2026-11-15
 - 「Forecast on tournament questions」11-08 起：success 32／failure 0，每天都有成功 run；最後一輪 11-14 23:50Z（43655205056，v0.4.8）。
