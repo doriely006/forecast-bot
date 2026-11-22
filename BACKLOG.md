@@ -2,6 +2,13 @@
 
 ## 收工日誌
 
+### 2026-11-22 研究段 Haiku -> Sonnet（user 拍板，推翻同日「不調」判決）
+- user 原話：「改，其實額度夠，haiku要改sonnet 可以」。只動 repo variable：`ANTHROPIC_RESEARCH_MODEL=claude-sonnet-5-5`（12:48Z 設）。沒改 code、沒 bump。
+- 連帶：摘要／解析共用同一個 model（budget.anthropic_models），也一起變 Sonnet；估 +$0.22／題（full 約 $0.47 -> $0.69，配速 $0.95／題仍 full）。價目表已有 sonnet (2/10)，不用設 ANTHROPIC_RESEARCH_PRICE。
+- 生效：env 在 job 起跑時定，12:48Z 時跑中的 45019003705（11:47Z 起）仍是 Haiku；下一個 job（接力或 cron）起才是 Sonnet。
+- 沒驗：真 run 的 `RESEARCH ... model=claude-sonnet-5-5` 行；Sonnet 會帶 server fallback 參數（main.supports_server_fallback 只排除 haiku），真 API 吃不吃沒打過——失敗會走 openai 備援，log 找「改用 openai」。
+- 影響判讀：12-04 後看 33169 時，11-22 前的題＝Haiku 研究、之後＝Sonnet 研究，分開算。退回＝刪這個 variable。
+
 ### 2026-11-22 策略檢討（Fable session，唯讀）
 - 判決：預測策略不調，等 MiniBench 33169（11-16～12-04）結算後只看 Claude 時代題再判；每題平均 < -10 才算有問題 [G 門檻]，屆時先動研究端（搜尋次數／Sonnet），不動預測次數／effort／clip。
 - 正賽 -51.1：前 4 題 11-11 01:20Z 前結算（+1.63 -> -46.03），provider 11-12 13:55Z 才切 → 是 OpenAI 的帳；第 5 題（11-20，-5.1）歸屬未知。Claude 乾淨樣本＝MiniBench 33135 17 題 +85.7（每題 +5.0，多為 x1）。
