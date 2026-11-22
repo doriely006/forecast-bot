@@ -5,7 +5,7 @@
 ### 2026-11-22 v0.4.10 逐題分數＋停損改量尺＋研究 Sonnet
 - standings.py：每賽事 `/posts/?tournaments=<id>&statuses=resolved&forecaster_id=<me>&with_cp=true` 分頁（沿用 3s 間隔＋429 退避），印逐題 post id／題型／結算時間／最後預測時間／peer（`spot_peer_score`，無則 `peer_score`）＋score_data keys。依最後預測時間分時代：正賽 `MAIN_CLAUDE_FROM`（2026-11-12T13:55:00Z）、MiniBench `MINIBENCH_CLAUDE_FROM`（2026-11-01T00:00:00Z）、Market Pulse `MARKETPULSE_CLAUDE_FROM`（預設＝正賽）；repo variable 可覆蓋（workflow standings step 已傳入）。
 - 停損：正賽 Claude 時代已結算 >=40 且每題平均 < `STOP_LOSS_MIN_AVG`（預設 0）→ 印「觸發停損」（只印不自動停）；未滿印「Claude 時代已結算 n 題，未滿 40」。名次照印、不參與判斷。README Stop-loss 段同步。
-- 研究 model：repo variable `ANTHROPIC_RESEARCH_MODEL=claude-sonnet-5-5`（researcher／summarizer／parser 共用，約 +$0.22/題，user 同意）；budget.py 單價表已有 sonnet-5-5 $2／$10、配速經 anthropic_models 讀同一變數。main.py `_log_research` 每題多印 `RESEARCHMODEL <post id> <model>`，用來分 Haiku 題與 Sonnet 題。未驗：下一輪有題時看 log。
+- 研究 model：repo variable `ANTHROPIC_RESEARCH_MODEL=claude-sonnet-5-5`（另一 session 已設，見 b833ad8 那條；researcher／summarizer／parser 共用，約 +$0.22/題，user 同意）；budget.py 單價表已有 sonnet-5-5 $2／$10、配速經 anthropic_models 讀同一變數。main.py `_log_research` 每題多印 `RESEARCHMODEL <post id> <model>`，用來分 Haiku 題與 Sonnet 題。未驗：下一輪有題時看 log。真跑 run 45024264926（一次性 workflow，已刪）：正賽 5 題最後預測全在 10 月＝舊時代 n=5 平均 -10.22、Claude 時代 n=0；Market Pulse Claude n=5 +4.89；MiniBench slug 指當前輪 33169、尚無結算＝0 題（33135 的 17 題不在內）。
 - 測試：test_standings 加 score_data／時代切分／停損三態；pytest 除既有 test_fallback_is_charged_to_the_openai_ledger 外全綠。版號 0.4.10（五處）。
 
 ### 2026-11-22 研究段 Haiku -> Sonnet（user 拍板，推翻同日「不調」判決）
