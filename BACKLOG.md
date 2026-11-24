@@ -2,13 +2,18 @@
 
 ## 收工日誌
 
+### 2026-11-24 v0.4.11 CDFSUM log
+- runner.py `cdfsum_line`＋`_ForecastOnlyClient.post_numeric_question_prediction`：攔 SDK publish 時交給 Metaculus 的最終 CDF（已過 get_cdf／標準化），印 `CDFSUM <post> <label|qid> lo_out p25 p50 p75 hi_out n`；封閉邊界 out 印 0；log 失敗印 `CDFSUM <post> error <Exc>`，不影響送出。
+- x 軸照 question bounds／zero_point 還原（同 SDK `_cdf_location_to_nominal_location`）；分位數＝CDF 反函數線性內插。只在真送出（publish=1）才印，dry run 不印。
+- 不改預測行為（SDK 補尾、標準化次數、prompt 都沒動）。測試：tests/test_runner.py 加 5 條 CDFSUM。版號 0.4.11（五處）。未驗：真 run 的 CDFSUM 行，下一輪有數值題時 grep。
+
 ### 2026-11-24 爆分題診斷（唯讀，沒改 code）
 - 證據＝user 存的 Metaculus PDF：Q46198 麻州 -74.5、Q46421 委內瑞拉 -39.3、Q46352 佳士得 -49.3、Q46016 NVIDIA GM -14.1；三顆爆分最後預測都在 11-12 前（GPT 時代）。
 - 5.1% 尾巴＝SDK 不是 bot 判斷：forecasting_tools numeric_report.py:451-462 開放邊界補 (P10/2)/(100+P90)/2 點＋558-570 `_standardize_cdf` 加 0.1% 底；aggregate 後 publish 再跑一次＝每次 +0.04（5.04→5.08→5.12）。NVIDIA GM 中位 71.7 對結果 71.5，輸在 >73 押 12.4%、社群夠尖。
 - 題目頁「My Prediction」0.1% 窄峰那列：本 code 產不出（agent 模擬 cdf_size 21–201 尾巴恆 ≥5.04%），且頁面寫 0 updates。推測是頁面編輯器的顯示、不是交出的預測；真正交出的＝「(previous)」列。沒 Metaculus token 查 forecast history 未結案。
 - 依此，麻州（bot 30/35/41 vs 24）、委內瑞拉（1.16/1.19/1.2 vs 1.14）＝中心偏高，不是太窄；委內瑞拉信了 PDVSA 1.252，題目背景已寫 IEA 一向比官方低 0.04–0.05。
 - 研究段：GPT 時代＝gpt-5.4-mini＋web_search `search_context_size=low`、`max_tool_calls=3`（main.py:431-434）；現在＝Anthropic web_search max_uses 5、Sonnet。AskNews／OpenRouter 無 secret，靜默略過。Q46352 在研究摘要上線前，log 無研究內容。
-- 🟡 log 沒印最終 CDF（只有型別），Claude 時代連續題形狀無從驗。候選：印最終 P25/P50/P75＋兩端質量；numeric 只標準化一次；評估能否關掉 SDK 自動補尾。user 未拍板。
+- 🟡（log 已做，v0.4.11）log 沒印最終 CDF（只有型別），Claude 時代連續題形狀無從驗。候選：印最終 P25/P50/P75＋兩端質量；numeric 只標準化一次；評估能否關掉 SDK 自動補尾。user 未拍板。
 
 ### 2026-11-22 v0.4.10 逐題分數＋停損改量尺＋研究 Sonnet
 - standings.py：每賽事 `/posts/?tournaments=<id>&statuses=resolved&forecaster_id=<me>&with_cp=true` 分頁（沿用 3s 間隔＋429 退避），印逐題 post id／題型／結算時間／最後預測時間／peer（`spot_peer_score`，無則 `peer_score`）＋score_data keys。依最後預測時間分時代：正賽 `MAIN_CLAUDE_FROM`（2026-11-12T13:55:00Z）、MiniBench `MINIBENCH_CLAUDE_FROM`（2026-11-01T00:00:00Z）、Market Pulse `MARKETPULSE_CLAUDE_FROM`（預設＝正賽）；repo variable 可覆蓋（workflow standings step 已傳入）。
