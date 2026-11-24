@@ -807,3 +807,55 @@ def test_lastforecast_diagnostics_printed_and_in_summary(fake_llm, capsys):  # v
     assert "LASTFORECAST 2282 unknown close=" in out
     text = runner.render_summary(r)
     assert "已預測題的最後預測時間：讀到 1／讀不到 1" in text and "2282 shape: my_forecasts{history:list[0],latest:NoneType}" in text
+
+
+# ---- v0.4.11 CDFSUM ----
+class _Q:
+    def __init__(self, lo=0.0, hi=100.0, open_lo=False, open_hi=False, zp=None, label=None):
+        self.id_of_post, self.id_of_question = 77, 88
+        self.lower_bound, self.upper_bound, self.zero_point = lo, hi, zp
+        self.open_lower_bound, self.open_upper_bound = open_lo, open_hi
+        self.group_question_option = label
+
+
+def _linear_cdf(n=101):
+    return [i / (n - 1) for i in range(n)]
+
+
+def test_cdfsum_closed_bounds_format_and_quantiles():
+    line = runner.cdfsum_line(_Q(), _linear_cdf())
+    assert line == "CDFSUM 77 88 lo_out=0.00 p25=25 p50=50 p75=75 hi_out=0.00 n=101"
+
+
+def test_cdfsum_open_bounds_and_group_label():
+    cdf = [0.05 + 0.9 * i / 100 for i in range(101)]  # 5% below, 5% above
+    line = runner.cdfsum_line(_Q(open_lo=True, open_hi=True, label="Sub A"), cdf)
+    assert line.startswith("CDFSUM 77 Sub A lo_out=5.00 ")
+    assert "hi_out=5.00 n=101" in line
+    assert "p50=50 " in line
+
+
+def test_cdfsum_closed_bound_prints_zero_out_even_with_mass():
+    cdf = _linear_cdf()
+    assert "lo_out=0.00" in runner.cdfsum_line(_Q(open_lo=False), cdf)
+    assert "hi_out=0.00" in runner.cdfsum_line(_Q(open_hi=False), cdf)
+
+
+def test_cdfsum_error_never_raises():
+    assert runner.cdfsum_line(_Q(), []) == "CDFSUM 77 error IndexError"
+    assert runner.cdfsum_line(None, [0, 1]) == "CDFSUM ? error AttributeError"
+
+
+def test_forecast_only_client_prints_and_forwards_even_on_log_failure(capsys):
+    class Real:
+        sent = None
+
+        def post_numeric_question_prediction(self, qid, cdf):
+            self.sent = (qid, cdf)
+
+    real = Real()
+    cdf = _linear_cdf()
+    runner._ForecastOnlyClient(real, _Q()).post_numeric_question_prediction(88, cdf)
+    assert "CDFSUM 77 88" in capsys.readouterr().out and real.sent == (88, cdf)
+    runner._ForecastOnlyClient(real, None).post_numeric_question_prediction(88, cdf)
+    assert "CDFSUM ? error AttributeError" in capsys.readouterr().out and real.sent == (88, cdf)

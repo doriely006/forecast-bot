@@ -543,13 +543,58 @@ def _count_failure(store: Any, tournament: str, q: Any, outcome: Outcome, now: d
         store.rollback(key)
 
 
+def _cdf_quantile(xs: list[float], cdf: list[float], q: float) -> float:
+    """Value x where the CDF first reaches q (linear inside the range); lower bound if q is below cdf[0]."""
+    if q <= cdf[0]:
+        return xs[0]
+    for i in range(1, len(cdf)):
+        if cdf[i] >= q:
+            span = cdf[i] - cdf[i - 1]
+            return xs[i] if span <= 0 else xs[i - 1] + (xs[i] - xs[i - 1]) * (q - cdf[i - 1]) / span
+    return xs[-1]
+
+
+def cdfsum_line(question: Any, cdf: Any) -> str:
+    """v0.4.11: one greppable line per numeric/discrete submission, computed from the CDF actually sent.
+    Never raises: a failure prints 'CDFSUM <post id> error <ExceptionClass>'."""
+    post_id = "?"
+    try:
+        post_id = getattr(question, "id_of_post", "?")
+        n = len(cdf)
+        lo_b, hi_b = float(question.lower_bound), float(question.upper_bound)
+        zp = getattr(question, "zero_point", None)
+        xs = []
+        for i in range(n):
+            loc = i / (n - 1)
+            if zp is None:
+                xs.append(lo_b + (hi_b - lo_b) * loc)
+            else:
+                ratio = (hi_b - zp) / (lo_b - zp)
+                xs.append(lo_b + (hi_b - lo_b) * (ratio**loc - 1) / (ratio - 1))
+        cdf = [float(c) for c in cdf]
+        lo_out = cdf[0] * 100 if question.open_lower_bound else 0.0
+        hi_out = (1 - cdf[-1]) * 100 if question.open_upper_bound else 0.0
+        label = getattr(question, "group_question_option", None) or getattr(question, "id_of_question", "?")
+        p25, p50, p75 = (_cdf_quantile(xs, cdf, q) for q in (0.25, 0.5, 0.75))
+        return (f"CDFSUM {post_id} {label} lo_out={lo_out:.2f} p25={p25:.6g} p50={p50:.6g} "
+                f"p75={p75:.6g} hi_out={hi_out:.2f} n={n}")
+    except Exception as e:
+        return f"CDFSUM {post_id} error {e.__class__.__name__}"
+
+
 class _ForecastOnlyClient:
     """Lets the SDK post the forecast exactly as it would, but holds back the
     comment so it can be sent (and retried, and stored) separately (A3)."""
 
-    def __init__(self, real: Any):
+    def __init__(self, real: Any, question: Any = None):
         self._real = real
         self.comment: tuple[Any, ...] | None = None
+        self._question = question
+
+    def post_numeric_question_prediction(self, question_id: Any, cdf_values: Any, *args: Any, **kwargs: Any) -> Any:
+        # v0.4.11: this is the exact CDF the SDK hands to Metaculus (after get_cdf and standardizing).
+        print(cdfsum_line(self._question, cdf_values), flush=True)
+        return self._real.post_numeric_question_prediction(question_id, cdf_values, *args, **kwargs)
 
     def post_question_comment(self, *args: Any, **kwargs: Any) -> None:
         self.comment = args
@@ -613,7 +658,7 @@ async def publish_one(report: Any, client: Any, tournament: str, store: Any, cos
     errors: list[str] = []
     if store is not None:
         store.add(post_id, report.explanation, url)  # write-ahead (A3)
-    held = _ForecastOnlyClient(client)
+    held = _ForecastOnlyClient(client, q)
     for attempt in range(PUBLISH_ATTEMPTS):
         try:
             await report.publish_report_to_metaculus(metaculus_client=held)
